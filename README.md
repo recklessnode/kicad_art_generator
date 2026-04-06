@@ -77,6 +77,20 @@ kicad-art art.png \
   --center
 ```
 
+Generate single-layer black-on-white art, ignore the white background, and emit a preview:
+
+```bash
+. .venv/bin/activate
+kicad-art cholla_cactus.png \
+  --output output/cholla_cactus_silks.kicad_mod \
+  --layer F.SilkS \
+  --width-mm 50 \
+  --foreground-rgb 0,0,0 \
+  --background-rgb 255,255,255 \
+  --color-tolerance 16 \
+  --preview-output output/cholla_cactus_silks_preview.png
+```
+
 ## What the tool does
 
 - Uses `svg2mod` for KiCad module generation
@@ -84,6 +98,8 @@ kicad-art art.png \
 - Accepts raster input by converting dark pixels into SVG rectangles before export
 - Supports two-color PNG-style assets with yellow sent to `F.Cu` and white sent to `F.SilkS`
 - Emits a single combined footprint so the art stays together as one reusable module
+- Supports single-layer raster extraction by retaining a chosen foreground color and explicitly ignoring a background color
+- Can generate a preview PNG on a green board-like background using the target layer color
 - Lets you target a specific KiCad layer such as `F.Cu`, `B.Cu`, `F.SilkS`, or `B.Mask`
 - Lets you size the output by width or height in millimeters
 - Supports preset width generation in inches for reusable art families
@@ -118,6 +134,9 @@ Main options:
 - `--color-tolerance`: matching tolerance for the dual-color split
 - `--copper-layer`: target copper layer, default `F.Cu`
 - `--silkscreen-layer`: target silkscreen layer, default `F.SilkS`
+- `--foreground-rgb`: retain this color in single-layer raster mode
+- `--background-rgb`: explicitly ignore this color in single-layer raster mode
+- `--preview-output`: write a PNG preview of the retained artwork in the chosen layer color
 
 ## Recommended workflow
 
@@ -127,6 +146,14 @@ Main options:
 4. Place the resulting art footprint like any other footprint in PCB Editor.
 
 The copper and silkscreen geometry is embedded into the footprint itself, which keeps the art durable and reusable across board designs.
+
+For black-on-white line art, a simpler workflow works well:
+
+1. Point `--foreground-rgb` at the ink color you want to keep, such as `0,0,0`.
+2. Point `--background-rgb` at the paper color you want to discard, such as `255,255,255`.
+3. Use `--preview-output` to quickly confirm the retained geometry before importing the footprint into KiCad.
+
+If an image is very large or detailed, reduce `--max-dimension` to keep the generated footprint smaller and easier to manage.
 
 ## Conversation Log
 

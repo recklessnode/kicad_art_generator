@@ -16,6 +16,15 @@ from PIL import Image
 
 RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 DEFAULT_DPI = 96
+PREVIEW_BOARD_GREEN = (24, 110, 62, 255)
+LAYER_PREVIEW_COLORS = {
+    "F.SilkS": (245, 245, 245, 255),
+    "B.SilkS": (220, 220, 220, 255),
+    "F.Cu": (247, 147, 26, 255),
+    "B.Cu": (196, 119, 22, 255),
+    "F.Mask": (100, 220, 160, 255),
+    "B.Mask": (70, 170, 130, 255),
+}
 
 
 @dataclass
@@ -29,6 +38,13 @@ class ColorMatch:
     name: str
     rgb: tuple[int, int, int]
     layer: str
+
+
+@dataclass
+class RasterSelection:
+    rows: list[list[tuple[int, int]]]
+    width: int
+    height: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,6 +167,18 @@ def parse_args() -> argparse.Namespace:
         default="F.SilkS",
         help="KiCad layer for the white art in dual-color mode",
     )
+    parser.add_argument(
+        "--foreground-rgb",
+        help="RGB triple to retain in single-layer raster mode, for example 0,0,0",
+    )
+    parser.add_argument(
+        "--background-rgb",
+        help="RGB triple to explicitly ignore in single-layer raster mode, for example 255,255,255",
+    )
+    parser.add_argument(
+        "--preview-output",
+        help="Optional PNG preview showing the selected art using the target layer color on a green board background",
+    )
     return parser.parse_args()
 
 
@@ -166,6 +194,11 @@ def main() -> None:
     threshold = validate_byte("threshold", args.threshold)
     alpha_threshold = validate_byte("alpha-threshold", args.alpha_threshold)
     validate_byte("color-tolerance", args.color_tolerance)
+    preview_output = (
+        Path(args.preview_output).expanduser().resolve() if args.preview_output else None
+    )
+    if preview_output is not None:
+        preview_output.parent.mkdir(parents=True, exist_ok=True)
 
     target_widths_mm = collect_target_widths_mm(args)
     if not target_widths_mm:
@@ -215,6 +248,12 @@ def main() -> None:
                     max_dimension=max(1, args.max_dimension),
                     verbose=args.verbose,
                     tmpdir=tmpdir,
+                    foreground_rgb=parse_optional_rgb_triplet(args.foreground_rgb),
+                    background_rgb=parse_optional_rgb_triplet(args.background_rgb),
+                    color_tolerance=args.color_tolerance,
+                    preview_output=preview_output_for_target(
+                        preview_output, output_path, target_width_mm, args
+                    ),
                 )
 
 
@@ -259,6 +298,20 @@ def resolve_footprint_name(
     return f"{base_name}_{width_label}"
 
 
+def preview_output_for_target(
+    preview_output: Path | None,
+    output_path: Path,
+    target_width_mm: float | None,
+    args: argparse.Namespace,
+) -> Path | None:
+    del target_width_mm
+    if preview_output is None:
+        return None
+    if not args.preset_sizes_in:
+        return preview_output
+    return preview_output.parent / f"{output_path.stem}_preview.png"
+
+
 def format_size_label(size_in: float) -> str:
     if math.isclose(size_in, round(size_in), abs_tol=1e-6):
         return f"{int(round(size_in))}in"
@@ -295,17 +348,36 @@ def generate_single_layer_module(
     max_dimension: int,
     verbose: bool,
     tmpdir: Path,
+    foreground_rgb: tuple[int, int, int] | None,
+    background_rgb: tuple[int, int, int] | None,
+    color_tolerance: int,
+    preview_output: Path | None,
 ) -> None:
     if input_path.suffix.lower() in RASTER_SUFFIXES:
         svg_input = tmpdir / f"{input_path.stem}.svg"
-        size = raster_to_svg(
+        selection = raster_to_selection(
             input_path=input_path,
-            output_svg=svg_input,
             threshold=threshold,
             alpha_threshold=alpha_threshold,
             invert=invert,
             max_dimension=max_dimension,
+            foreground_rgb=foreground_rgb,
+            background_rgb=background_rgb,
+            color_tolerance=color_tolerance,
         )
+        rectangles = merge_row_runs(selection.rows)
+        if not rectangles:
+            raise SystemExit("No visible art remained after raster processing.")
+        write_svg_rects(svg_input, selection.width, selection.height, rectangles)
+        if preview_output is not None:
+            write_preview_png(
+                rows=selection.rows,
+                width=selection.width,
+                height=selection.height,
+                layer=layer,
+                output_path=preview_output,
+            )
+        size = ArtworkSize(width_px=float(selection.width), height_px=float(selection.height))
     else:
         svg_input = input_path
         size = load_svg_size(svg_input)
@@ -407,6 +479,12 @@ def parse_rgb_triplet(value: str) -> tuple[int, int, int]:
     return channels
 
 
+def parse_optional_rgb_triplet(value: str | None) -> tuple[int, int, int] | None:
+    if value is None:
+        return None
+    return parse_rgb_triplet(value)
+
+
 def open_and_scale_image(input_path: Path, max_dimension: int) -> tuple[Image.Image, ArtworkSize]:
     image = Image.open(input_path).convert("RGBA")
     width, height = image.size
@@ -456,14 +534,16 @@ def extract_color_rows(
     return rows
 
 
-def raster_to_svg(
+def raster_to_selection(
     input_path: Path,
-    output_svg: Path,
     threshold: int,
     alpha_threshold: int,
     invert: bool,
     max_dimension: int,
-) -> ArtworkSize:
+    foreground_rgb: tuple[int, int, int] | None,
+    background_rgb: tuple[int, int, int] | None,
+    color_tolerance: int,
+) -> RasterSelection:
     image, size = open_and_scale_image(input_path, max_dimension)
 
     pixels = image.load()
@@ -475,9 +555,17 @@ def raster_to_svg(
         run_start: int | None = None
         for x in range(width):
             red, green, blue, alpha = pixels[x, y]
-            luminance = int(round(0.299 * red + 0.587 * green + 0.114 * blue))
-            filled = alpha >= alpha_threshold and (
-                luminance > threshold if invert else luminance <= threshold
+            filled = pixel_is_selected(
+                red=red,
+                green=green,
+                blue=blue,
+                alpha=alpha,
+                alpha_threshold=alpha_threshold,
+                threshold=threshold,
+                invert=invert,
+                foreground_rgb=foreground_rgb,
+                background_rgb=background_rgb,
+                color_tolerance=color_tolerance,
             )
             if filled and run_start is None:
                 run_start = x
@@ -488,12 +576,7 @@ def raster_to_svg(
             runs.append((run_start, width))
         rows.append(runs)
 
-    rectangles = merge_row_runs(rows)
-    if not rectangles:
-        raise SystemExit("No visible art remained after raster thresholding.")
-
-    write_svg_rects(output_svg, width, height, rectangles)
-    return size
+    return RasterSelection(rows=rows, width=int(size.width_px), height=int(size.height_px))
 
 
 def write_svg_rects(
@@ -512,6 +595,56 @@ def write_svg_rects(
         )
     svg_lines.extend(["  </g>", "</svg>"])
     output_svg.write_text("\n".join(svg_lines) + "\n", encoding="utf-8")
+
+
+def pixel_is_selected(
+    red: int,
+    green: int,
+    blue: int,
+    alpha: int,
+    alpha_threshold: int,
+    threshold: int,
+    invert: bool,
+    foreground_rgb: tuple[int, int, int] | None,
+    background_rgb: tuple[int, int, int] | None,
+    color_tolerance: int,
+) -> bool:
+    if alpha < alpha_threshold:
+        return False
+
+    pixel_rgb = (red, green, blue)
+    if background_rgb is not None and color_distance_max(pixel_rgb, background_rgb) <= color_tolerance:
+        return False
+
+    if foreground_rgb is not None:
+        return color_distance_max(pixel_rgb, foreground_rgb) <= color_tolerance
+
+    luminance = int(round(0.299 * red + 0.587 * green + 0.114 * blue))
+    return luminance > threshold if invert else luminance <= threshold
+
+
+def color_distance_max(rgb_a: tuple[int, int, int], rgb_b: tuple[int, int, int]) -> int:
+    return max(abs(rgb_a[0] - rgb_b[0]), abs(rgb_a[1] - rgb_b[1]), abs(rgb_a[2] - rgb_b[2]))
+
+
+def write_preview_png(
+    rows: list[list[tuple[int, int]]],
+    width: int,
+    height: int,
+    layer: str,
+    output_path: Path,
+) -> None:
+    preview = Image.new("RGBA", (width, height), PREVIEW_BOARD_GREEN)
+    pixels = preview.load()
+    foreground = LAYER_PREVIEW_COLORS.get(layer, (245, 245, 245, 255))
+
+    for y, runs in enumerate(rows):
+        for x0, x1 in runs:
+            for x in range(x0, x1):
+                pixels[x, y] = foreground
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    preview.save(output_path, format="PNG")
 
 
 def merge_row_runs(rows: Iterable[list[tuple[int, int]]]) -> list[tuple[int, int, int, int]]:

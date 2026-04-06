@@ -82,3 +82,45 @@ def test_dual_color_generates_combined_layers_and_presets(tmp_path: Path) -> Non
     assert text.count("(fp_poly") >= 2
     assert "(layer F.Cu)" in text
     assert "(layer F.SilkS)" in text
+
+
+def test_single_layer_color_match_and_preview(tmp_path: Path) -> None:
+    image_path = tmp_path / "cactus_like.png"
+    output = tmp_path / "cactus.kicad_mod"
+    preview = tmp_path / "cactus_preview.png"
+
+    image = Image.new("RGBA", (24, 24), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((4, 3, 19, 20), fill=(0, 0, 0, 255))
+    draw.rectangle((9, 9, 14, 14), fill=(255, 255, 255, 255))
+    image.save(image_path)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--output",
+            str(output),
+            "--layer",
+            "F.SilkS",
+            "--width-mm",
+            "12",
+            "--foreground-rgb",
+            "0,0,0",
+            "--background-rgb",
+            "255,255,255",
+            "--color-tolerance",
+            "8",
+            "--preview-output",
+            str(preview),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "(module cactus" in text
+    assert "(layer F.SilkS)" in text
+    assert preview.exists()
