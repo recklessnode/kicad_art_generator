@@ -42,6 +42,7 @@ def test_svg_example_generates_kicad_module(tmp_path: Path) -> None:
 def test_dual_color_generates_combined_layers_and_presets(tmp_path: Path) -> None:
     image_path = tmp_path / "test.png"
     output_dir = tmp_path / "out"
+    preview = tmp_path / "out_preview.png"
 
     image = Image.new("RGBA", (32, 24), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -63,6 +64,12 @@ def test_dual_color_generates_combined_layers_and_presets(tmp_path: Path) -> Non
             "1,2,4",
             "--footprint-name",
             "badge_art",
+            "--yellow-preset",
+            "copper-exposed",
+            "--white-preset",
+            "silkscreen",
+            "--preview-output",
+            str(preview),
             "--center",
         ],
         check=True,
@@ -81,7 +88,9 @@ def test_dual_color_generates_combined_layers_and_presets(tmp_path: Path) -> Non
     assert "(attr board_only exclude_from_pos_files exclude_from_bom)" in text
     assert text.count("(fp_poly") >= 2
     assert "(layer F.Cu)" in text
+    assert "(layer F.Mask)" in text
     assert "(layer F.SilkS)" in text
+    assert (tmp_path / "badge_art_2in_preview.png").exists()
 
 
 def test_single_layer_color_match_and_preview(tmp_path: Path) -> None:
@@ -124,3 +133,38 @@ def test_single_layer_color_match_and_preview(tmp_path: Path) -> None:
     assert "(module cactus" in text
     assert "(layer F.SilkS)" in text
     assert preview.exists()
+
+
+def test_single_layer_copper_exposed_preset_adds_mask(tmp_path: Path) -> None:
+    image_path = tmp_path / "blob.png"
+    output = tmp_path / "blob.kicad_mod"
+
+    image = Image.new("RGBA", (20, 20), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((3, 3, 16, 16), fill=(0, 0, 0, 255))
+    image.save(image_path)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--output",
+            str(output),
+            "--art-preset",
+            "copper-exposed",
+            "--width-mm",
+            "10",
+            "--foreground-rgb",
+            "0,0,0",
+            "--background-rgb",
+            "255,255,255",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "(layer F.Cu)" in text
+    assert "(layer F.Mask)" in text

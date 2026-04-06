@@ -77,6 +77,25 @@ kicad-art art.png \
   --center
 ```
 
+Generate a dual-color ENIG-style logo preview, with yellow exposed copper and green silkscreen:
+
+```bash
+. .venv/bin/activate
+kicad-art "Cholla Energy.png" \
+  --mode dual-color \
+  --output output/cholla_energy_enig.kicad_mod \
+  --footprint-name cholla_energy_enig \
+  --width-mm 50 \
+  --yellow-rgb 246,226,0 \
+  --white-rgb 1,105,56 \
+  --yellow-preset copper-exposed \
+  --white-preset silkscreen \
+  --color-tolerance 32 \
+  --alpha-threshold 32 \
+  --preview-output output/cholla_energy_enig_preview.png \
+  --center
+```
+
 Generate the same style at fully custom parametric sizes:
 
 ```bash
@@ -124,6 +143,7 @@ kicad-art cholla_cactus.png \
 - Emits a single combined footprint so the art stays together as one reusable module
 - Supports single-layer raster extraction by retaining a chosen foreground color and explicitly ignoring a background color
 - Can generate a preview PNG on a green board-like background using the target layer color
+- Supports named art presets that emit the PCB layers needed for visible art finishes
 - Lets you target a specific KiCad layer such as `F.Cu`, `B.Cu`, `F.SilkS`, or `B.Mask`
 - Lets you size the output by width or height in millimeters
 - Supports preset width generation in inches for reusable art families
@@ -143,6 +163,7 @@ Main options:
 - `--output`: output `.kicad_mod` path
 - `--mode dual-color`: split yellow and white into a single combined footprint
 - `--layer`: KiCad layer to force the artwork onto
+- `--art-preset`: named single-layer art behavior such as `silkscreen`, `copper-exposed`, `copper-covered`, or `substrate-exposed`
 - `--width-mm`: target width in millimeters
 - `--height-mm`: target height in millimeters
 - `--size-in`: target width in inches
@@ -160,9 +181,24 @@ Main options:
 - `--color-tolerance`: matching tolerance for the dual-color split
 - `--copper-layer`: target copper layer, default `F.Cu`
 - `--silkscreen-layer`: target silkscreen layer, default `F.SilkS`
+- `--yellow-preset`: named preset for the first matched color in dual-color mode
+- `--white-preset`: named preset for the second matched color in dual-color mode
 - `--foreground-rgb`: retain this color in single-layer raster mode
 - `--background-rgb`: explicitly ignore this color in single-layer raster mode
 - `--preview-output`: write a PNG preview of the retained artwork in the chosen layer color
+
+Run `kicad-art --help` to see the full current option set.
+
+## Named Art Presets
+
+- `silkscreen`: places art on `F.SilkS`
+- `back-silkscreen`: places art on `B.SilkS`
+- `copper-exposed`: places art on copper and opens mask above it, yielding visible ENIG-style gold
+- `back-copper-exposed`: the back-side version of exposed copper art
+- `copper-covered`: places art on copper only, leaving solder mask over it for a darker green tone
+- `back-copper-covered`: the back-side version of covered copper art
+- `substrate-exposed`: opens solder mask without copper for a brown substrate tone
+- `back-substrate-exposed`: the back-side version of exposed substrate art
 
 ## Recommended workflow
 
@@ -172,6 +208,8 @@ Main options:
 4. Place the resulting art footprint like any other footprint in PCB Editor.
 
 The copper and silkscreen geometry is embedded into the footprint itself, which keeps the art durable and reusable across board designs.
+
+When using copper for visible art, prefer `copper-exposed` so the tool emits both the copper feature and the matching solder-mask opening. If you want a darker green tone instead, use `copper-covered` so the copper remains under solder mask.
 
 For black-on-white line art, a simpler workflow works well:
 

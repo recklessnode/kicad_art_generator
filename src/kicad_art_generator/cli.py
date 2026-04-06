@@ -17,14 +17,10 @@ from PIL import Image
 RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 DEFAULT_DPI = 96
 PREVIEW_BOARD_GREEN = (24, 110, 62, 255)
-LAYER_PREVIEW_COLORS = {
-    "F.SilkS": (245, 245, 245, 255),
-    "B.SilkS": (220, 220, 220, 255),
-    "F.Cu": (247, 147, 26, 255),
-    "B.Cu": (196, 119, 22, 255),
-    "F.Mask": (100, 220, 160, 255),
-    "B.Mask": (70, 170, 130, 255),
-}
+PREVIEW_WHITE = (245, 245, 245, 255)
+PREVIEW_GOLD = (230, 183, 45, 255)
+PREVIEW_DARK_GREEN = (15, 72, 43, 255)
+PREVIEW_BROWN = (139, 103, 63, 255)
 
 
 @dataclass
@@ -45,6 +41,25 @@ class RasterSelection:
     rows: list[list[tuple[int, int]]]
     width: int
     height: int
+
+
+@dataclass(frozen=True)
+class ArtPreset:
+    name: str
+    layers: tuple[str, ...]
+    preview_color: tuple[int, int, int, int]
+
+
+ART_PRESETS = {
+    "silkscreen": ArtPreset("silkscreen", ("F.SilkS",), PREVIEW_WHITE),
+    "back-silkscreen": ArtPreset("back-silkscreen", ("B.SilkS",), (220, 220, 220, 255)),
+    "copper-exposed": ArtPreset("copper-exposed", ("F.Cu", "F.Mask"), PREVIEW_GOLD),
+    "back-copper-exposed": ArtPreset("back-copper-exposed", ("B.Cu", "B.Mask"), (190, 145, 35, 255)),
+    "copper-covered": ArtPreset("copper-covered", ("F.Cu",), PREVIEW_DARK_GREEN),
+    "back-copper-covered": ArtPreset("back-copper-covered", ("B.Cu",), (12, 60, 38, 255)),
+    "substrate-exposed": ArtPreset("substrate-exposed", ("F.Mask",), PREVIEW_BROWN),
+    "back-substrate-exposed": ArtPreset("back-substrate-exposed", ("B.Mask",), (120, 88, 54, 255)),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,6 +85,11 @@ def parse_args() -> argparse.Namespace:
         "--layer",
         default="F.SilkS",
         help="KiCad layer to force artwork onto in single-layer mode",
+    )
+    parser.add_argument(
+        "--art-preset",
+        choices=sorted(ART_PRESETS),
+        help="Named PCB art preset for single-layer mode, for example silkscreen or copper-exposed",
     )
     parser.add_argument(
         "--width-mm",
@@ -176,6 +196,16 @@ def parse_args() -> argparse.Namespace:
         help="KiCad layer for the white art in dual-color mode",
     )
     parser.add_argument(
+        "--yellow-preset",
+        choices=sorted(ART_PRESETS),
+        help="Named PCB art preset for the yellow-matched artwork in dual-color mode",
+    )
+    parser.add_argument(
+        "--white-preset",
+        choices=sorted(ART_PRESETS),
+        help="Named PCB art preset for the second matched artwork in dual-color mode",
+    )
+    parser.add_argument(
         "--foreground-rgb",
         help="RGB triple to retain in single-layer raster mode, for example 0,0,0",
     )
@@ -237,6 +267,9 @@ def main() -> None:
                     args=args,
                     tmpdir=tmpdir,
                     alpha_threshold=alpha_threshold,
+                    preview_output=preview_output_for_target(
+                        preview_output, output_path, target_width_mm, args
+                    ),
                 )
             else:
                 generate_single_layer_module(
@@ -246,7 +279,7 @@ def main() -> None:
                     value=args.value,
                     target_width_mm=target_width_mm,
                     height_mm=args.height_mm,
-                    layer=args.layer,
+                    preset=resolve_single_art_preset(args),
                     precision=args.precision,
                     dpi=args.dpi,
                     center=args.center,
@@ -314,6 +347,35 @@ def uses_directory_output(args: argparse.Namespace) -> bool:
     return bool(args.preset_sizes_in or args.sizes_in or args.sizes_mm)
 
 
+def get_art_preset(name: str) -> ArtPreset:
+    try:
+        return ART_PRESETS[name]
+    except KeyError as exc:
+        raise SystemExit(f"Unknown art preset: {name}") from exc
+
+
+def resolve_single_art_preset(args: argparse.Namespace) -> ArtPreset:
+    if args.art_preset:
+        return get_art_preset(args.art_preset)
+    return ArtPreset(args.layer, (args.layer,), preview_color_for_layer(args.layer))
+
+
+def resolve_dual_art_preset(preset_name: str | None, fallback_layer: str) -> ArtPreset:
+    if preset_name:
+        return get_art_preset(preset_name)
+    return ArtPreset(fallback_layer, (fallback_layer,), preview_color_for_layer(fallback_layer))
+
+
+def preview_color_for_layer(layer: str) -> tuple[int, int, int, int]:
+    if layer in ("F.SilkS", "B.SilkS"):
+        return PREVIEW_WHITE
+    if layer in ("F.Cu", "B.Cu"):
+        return PREVIEW_DARK_GREEN
+    if layer in ("F.Mask", "B.Mask"):
+        return PREVIEW_BROWN
+    return PREVIEW_WHITE
+
+
 def preview_output_for_target(
     preview_output: Path | None,
     output_path: Path,
@@ -354,7 +416,7 @@ def generate_single_layer_module(
     value: str,
     target_width_mm: float | None,
     height_mm: float | None,
-    layer: str,
+    preset: ArtPreset,
     precision: float,
     dpi: int,
     center: bool,
@@ -390,7 +452,7 @@ def generate_single_layer_module(
                 rows=selection.rows,
                 width=selection.width,
                 height=selection.height,
-                layer=layer,
+                color=preset.preview_color,
                 output_path=preview_output,
             )
         size = ArtworkSize(width_px=float(selection.width), height_px=float(selection.height))
@@ -405,20 +467,24 @@ def generate_single_layer_module(
         height_mm=height_mm,
     )
 
-    run_svg2mod(
-        svg_input=svg_input,
-        output_path=output_path,
-        footprint_name=footprint_name,
-        value=value,
-        layer=layer,
-        center=center,
-        precision=precision,
-        dpi=dpi,
-        scale_factor=scale_factor,
-        verbose=verbose,
-    )
+    temp_sections: list[str] = []
+    for layer in preset.layers:
+        temp_output = tmpdir / f"{footprint_name}_{layer.replace('.', '_')}.kicad_mod"
+        run_svg2mod(
+            svg_input=svg_input,
+            output_path=temp_output,
+            footprint_name=footprint_name,
+            value=value,
+            layer=layer,
+            center=center,
+            precision=precision,
+            dpi=dpi,
+            scale_factor=scale_factor,
+            verbose=verbose,
+        )
+        temp_sections.extend(extract_module_sections(temp_output))
 
-    normalize_module_file(output_path, footprint_name, value)
+    write_combined_module(output_path, footprint_name, value, temp_sections)
 
 
 def generate_dual_color_module(
@@ -431,6 +497,7 @@ def generate_dual_color_module(
     args: argparse.Namespace,
     tmpdir: Path,
     alpha_threshold: int,
+    preview_output: Path | None,
 ) -> None:
     yellow_rgb = parse_rgb_triplet(args.yellow_rgb)
     white_rgb = parse_rgb_triplet(args.white_rgb)
@@ -442,7 +509,10 @@ def generate_dual_color_module(
     ]
 
     module_sections: list[str] = []
+    preview_layers: list[tuple[list[list[tuple[int, int]]], tuple[int, int, int, int]]] = []
     for match in color_matches:
+        preset_name = args.yellow_preset if match.name == "yellow" else args.white_preset
+        preset = resolve_dual_art_preset(preset_name, match.layer)
         color_svg = tmpdir / f"{match.name}.svg"
         rows = extract_color_rows(
             image=image,
@@ -454,6 +524,7 @@ def generate_dual_color_module(
         if not rectangles:
             continue
         write_svg_rects(color_svg, int(size.width_px), int(size.height_px), rectangles)
+        preview_layers.append((rows, preset.preview_color))
 
         scale_factor = compute_scale_factor(
             size=size,
@@ -461,23 +532,32 @@ def generate_dual_color_module(
             width_mm=target_width_mm,
             height_mm=height_mm,
         )
-        temp_module = tmpdir / f"{match.name}.kicad_mod"
-        run_svg2mod(
-            svg_input=color_svg,
-            output_path=temp_module,
-            footprint_name=footprint_name,
-            value=value,
-            layer=match.layer,
-            center=args.center,
-            precision=args.precision,
-            dpi=args.dpi,
-            scale_factor=scale_factor,
-            verbose=args.verbose,
-        )
-        module_sections.extend(extract_module_sections(temp_module))
+        for layer in preset.layers:
+            temp_module = tmpdir / f"{match.name}_{layer.replace('.', '_')}.kicad_mod"
+            run_svg2mod(
+                svg_input=color_svg,
+                output_path=temp_module,
+                footprint_name=footprint_name,
+                value=value,
+                layer=layer,
+                center=args.center,
+                precision=args.precision,
+                dpi=args.dpi,
+                scale_factor=scale_factor,
+                verbose=args.verbose,
+            )
+            module_sections.extend(extract_module_sections(temp_module))
 
     if not module_sections:
         raise SystemExit("No matching yellow or white pixels were found in the input image.")
+
+    if preview_output is not None:
+        write_multi_preview_png(
+            preview_layers=preview_layers,
+            width=int(size.width_px),
+            height=int(size.height_px),
+            output_path=preview_output,
+        )
 
     write_combined_module(
         output_path=output_path,
@@ -647,17 +727,35 @@ def write_preview_png(
     rows: list[list[tuple[int, int]]],
     width: int,
     height: int,
-    layer: str,
+    color: tuple[int, int, int, int],
     output_path: Path,
 ) -> None:
     preview = Image.new("RGBA", (width, height), PREVIEW_BOARD_GREEN)
     pixels = preview.load()
-    foreground = LAYER_PREVIEW_COLORS.get(layer, (245, 245, 245, 255))
 
     for y, runs in enumerate(rows):
         for x0, x1 in runs:
             for x in range(x0, x1):
-                pixels[x, y] = foreground
+                pixels[x, y] = color
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    preview.save(output_path, format="PNG")
+
+
+def write_multi_preview_png(
+    preview_layers: list[tuple[list[list[tuple[int, int]]], tuple[int, int, int, int]]],
+    width: int,
+    height: int,
+    output_path: Path,
+) -> None:
+    preview = Image.new("RGBA", (width, height), PREVIEW_BOARD_GREEN)
+    pixels = preview.load()
+
+    for rows, color in preview_layers:
+        for y, runs in enumerate(rows):
+            for x0, x1 in runs:
+                for x in range(x0, x1):
+                    pixels[x, y] = color
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     preview.save(output_path, format="PNG")
