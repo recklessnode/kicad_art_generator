@@ -254,6 +254,63 @@ def test_export_to_pretty_dir(tmp_path: Path) -> None:
     assert "(module logo" in exported.read_text(encoding="utf-8")
 
 
+def test_library_bundle_export(tmp_path: Path) -> None:
+    image_path = tmp_path / "bundle.png"
+    output = tmp_path / "bundle_logo.kicad_mod"
+    library_root = tmp_path / "bundle_out"
+
+    image = Image.new("RGBA", (18, 18), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((4, 4, 13, 13), fill=(0, 0, 0, 255))
+    image.save(image_path)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--output",
+            str(output),
+            "--width-mm",
+            "8",
+            "--foreground-rgb",
+            "0,0,0",
+            "--background-rgb",
+            "255,255,255",
+            "--library-root",
+            str(library_root),
+            "--library-name",
+            "PromoArt",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    assert (library_root / "PromoArt.pretty" / "bundle_logo.kicad_mod").exists()
+    assert (library_root / "fp-lib-table").exists()
+    assert (library_root / "library_manifest.md").exists()
+
+
+def test_help_includes_thorough_example() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            "--help",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert 'kicad-art "Cholla Energy.png" \\' in result.stdout
+    assert "--yellow-preset copper-exposed" in result.stdout
+    assert "--library-root ./libraries" in result.stdout
+
+
 def test_analyze_mode_suggests_dual_color_mapping(tmp_path: Path) -> None:
     image_path = tmp_path / "analyze_dual.png"
 

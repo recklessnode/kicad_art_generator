@@ -14,3 +14,4 @@
 - Added direct `.pretty` export support so generated footprints can be written straight into a KiCad footprint library.
 - Improved dual-color extraction so it absorbs adjacent shades around the primary colors, fixing missing darker-green text in the Cholla logo workflow.
 - Added an `analyze` mode that inspects dominant opaque color clusters, suggests mappings, and explicitly warns when an image palette is too ambiguous.
+- Added a library-bundle export flow that creates a named `.pretty` library plus KiCad import metadata, and expanded CLI help with real-world multi-line examples.

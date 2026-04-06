@@ -175,6 +175,20 @@ kicad-art cholla_cactus.png \
   --pretty-dir ./ArtAssets.pretty
 ```
 
+Create a fuller KiCad library bundle that can be imported into a project wholesale:
+
+```bash
+. .venv/bin/activate
+kicad-art cholla_cactus.png \
+  --output output/cholla_cactus_bundle.kicad_mod \
+  --footprint-name cholla_cactus_bundle \
+  --width-mm 50 \
+  --foreground-rgb 0,0,0 \
+  --background-rgb 255,255,255 \
+  --library-root ./libraries \
+  --library-name PromoArt
+```
+
 ## What the tool does
 
 - Uses `svg2mod` for KiCad module generation
@@ -232,6 +246,8 @@ Main options:
 - `--background-rgb`: explicitly ignore this color in single-layer raster mode
 - `--preview-output`: write a PNG preview of the retained artwork in the chosen layer color
 - `--pretty-dir`: copy generated `.kicad_mod` files directly into a target `.pretty` library directory
+- `--library-root`: create a KiCad library bundle directory containing a named `.pretty` library and import metadata
+- `--library-name`: library name used with `--library-root`
 - `--analysis-cluster-tolerance`: merge nearby opaque colors into shared palette clusters during analysis
 - `--analysis-min-fraction`: minimum opaque coverage required for a cluster to count as a strong analysis candidate
 
@@ -249,6 +265,16 @@ It reports:
 - a suggested `single-layer` or `dual-color` workflow when confidence is high
 
 If the palette is too ambiguous, the tool exits with a warning instead of pretending it found a clean mapping.
+
+## Library Bundles
+
+If you use `--library-root` together with `--library-name`, the tool creates:
+
+- `<LibraryName>.pretty/`: the generated footprint library directory
+- `fp-lib-table`: a KiCad footprint-library table snippet you can merge into a project
+- `library_manifest.md`: a small description of the generated bundle
+
+This makes it easier to move a full art library into KiCad instead of importing footprints one at a time.
 
 ## Named Art Presets
 
