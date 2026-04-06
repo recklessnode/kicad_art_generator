@@ -311,6 +311,50 @@ def test_help_includes_thorough_example() -> None:
     assert "--library-root ./libraries" in result.stdout
 
 
+def test_multi_color_svg_best_effort_mapping(tmp_path: Path) -> None:
+    svg_path = tmp_path / "multi.svg"
+    output = tmp_path / "multi.kicad_mod"
+    preview = tmp_path / "multi_preview.png"
+
+    svg_path.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80" viewBox="0 0 200 80">
+  <rect x="0" y="0" width="40" height="80" fill="#ff0000"/>
+  <rect x="50" y="0" width="40" height="80" fill="#00ff00"/>
+  <rect x="100" y="0" width="40" height="80" fill="#0000ff"/>
+  <rect x="150" y="0" width="40" height="80" fill="#ffff00"/>
+</svg>
+""",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(svg_path),
+            "--mode",
+            "multi-color",
+            "--output",
+            str(output),
+            "--width-mm",
+            "30",
+            "--multi-color-presets",
+            "silkscreen,copper-exposed,copper-covered,substrate-exposed",
+            "--preview-output",
+            str(preview),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "(layer F.SilkS)" in text
+    assert "(layer F.Cu)" in text
+    assert "(layer F.Mask)" in text
+    assert preview.exists()
+
+
 def test_analyze_mode_suggests_dual_color_mapping(tmp_path: Path) -> None:
     image_path = tmp_path / "analyze_dual.png"
 
@@ -345,11 +389,13 @@ def test_analyze_mode_suggests_dual_color_mapping(tmp_path: Path) -> None:
 def test_analyze_mode_complains_on_ambiguous_palette(tmp_path: Path) -> None:
     image_path = tmp_path / "ambiguous.png"
 
-    image = Image.new("RGBA", (30, 10), (0, 0, 0, 0))
+    image = Image.new("RGBA", (50, 10), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     draw.rectangle((0, 0, 9, 9), fill=(200, 0, 0, 255))
     draw.rectangle((10, 0, 19, 9), fill=(0, 180, 0, 255))
     draw.rectangle((20, 0, 29, 9), fill=(0, 0, 200, 255))
+    draw.rectangle((30, 0, 39, 9), fill=(200, 200, 0, 255))
+    draw.rectangle((40, 0, 49, 9), fill=(200, 0, 200, 255))
     image.save(image_path)
 
     result = subprocess.run(
@@ -362,6 +408,8 @@ def test_analyze_mode_complains_on_ambiguous_palette(tmp_path: Path) -> None:
             "analyze",
             "--analysis-min-fraction",
             "0.2",
+            "--analysis-cluster-tolerance",
+            "0",
         ],
         cwd=REPO_ROOT,
         text=True,
@@ -370,3 +418,32 @@ def test_analyze_mode_complains_on_ambiguous_palette(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "Could not find a confident dominant-color mapping." in result.stdout
+
+
+def test_analyze_mode_suggests_multi_color_mapping(tmp_path: Path) -> None:
+    image_path = tmp_path / "analyze_multi.png"
+
+    image = Image.new("RGBA", (60, 20), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 19, 19), fill=(255, 255, 255, 255))
+    draw.rectangle((20, 0, 39, 19), fill=(240, 81, 54, 255))
+    draw.rectangle((40, 0, 59, 19), fill=(20, 191, 219, 255))
+    image.save(image_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--mode",
+            "analyze",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "multi-color art" in result.stdout
+    assert "255,255,255 -> silkscreen" in result.stdout

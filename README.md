@@ -65,6 +65,15 @@ Analyze an image first and get a suggested mapping:
 kicad-art "Cholla Energy.png" --mode analyze
 ```
 
+Analyze a multi-color SVG and get a best-effort mapping suggestion:
+
+```bash
+. .venv/bin/activate
+kicad-art "RecklessSystemsLogoWhiteColor.svg" \
+  --mode analyze \
+  --svg-render-width 1024
+```
+
 Generate a footprint from a bitmap:
 
 ```bash
@@ -189,6 +198,21 @@ kicad-art cholla_cactus.png \
   --library-name PromoArt
 ```
 
+Generate a best-effort multi-color footprint from an SVG by consuming the dominant visible color families:
+
+```bash
+. .venv/bin/activate
+kicad-art "RecklessSystemsLogoWhiteColor.svg" \
+  --mode multi-color \
+  --output output/reckless_svg_multicolor.kicad_mod \
+  --footprint-name reckless_svg_multicolor \
+  --width-mm 60 \
+  --multi-color-presets silkscreen,copper-exposed,copper-covered,substrate-exposed \
+  --preview-output output/reckless_svg_multicolor_preview.png \
+  --svg-render-width 1024 \
+  --center
+```
+
 ## What the tool does
 
 - Uses `svg2mod` for KiCad module generation
@@ -200,6 +224,7 @@ kicad-art cholla_cactus.png \
 - Can generate a preview PNG on a green board-like background using the target layer color
 - Supports named art presets that emit the PCB layers needed for visible art finishes
 - Can analyze an image palette and suggest likely single-layer or dual-color mappings
+- Can perform best-effort multi-color mapping, including on SVG input by rasterizing it for palette analysis
 - Lets you target a specific KiCad layer such as `F.Cu`, `B.Cu`, `F.SilkS`, or `B.Mask`
 - Lets you size the output by width or height in millimeters
 - Supports preset width generation in inches for reusable art families
@@ -219,6 +244,7 @@ Main options:
 - `--output`: output `.kicad_mod` path
 - `--mode dual-color`: split yellow and white into a single combined footprint
 - `--mode analyze`: inspect the image palette and print suggested mappings without generating a footprint
+- `--mode multi-color`: map the strongest visible color families to a preset list in order
 - `--layer`: KiCad layer to force the artwork onto
 - `--art-preset`: named single-layer art behavior such as `silkscreen`, `copper-exposed`, `copper-covered`, or `substrate-exposed`
 - `--width-mm`: target width in millimeters
@@ -250,6 +276,9 @@ Main options:
 - `--library-name`: library name used with `--library-root`
 - `--analysis-cluster-tolerance`: merge nearby opaque colors into shared palette clusters during analysis
 - `--analysis-min-fraction`: minimum opaque coverage required for a cluster to count as a strong analysis candidate
+- `--multi-color-presets`: preset sequence used by multi-color mapping
+- `--max-color-count`: maximum number of dominant color families to consume in multi-color mode
+- `--svg-render-width`: raster width used when analyzing or multi-color-mapping SVG input
 
 Run `kicad-art --help` to see the full current option set.
 
@@ -263,6 +292,7 @@ It reports:
 - dominant opaque color clusters
 - a suggested background color to ignore when one is obvious
 - a suggested `single-layer` or `dual-color` workflow when confidence is high
+- a suggested `multi-color` workflow when several dominant visible color families are present
 
 If the palette is too ambiguous, the tool exits with a warning instead of pretending it found a clean mapping.
 
@@ -275,6 +305,16 @@ If you use `--library-root` together with `--library-name`, the tool creates:
 - `library_manifest.md`: a small description of the generated bundle
 
 This makes it easier to move a full art library into KiCad instead of importing footprints one at a time.
+
+## SVG Best-Effort Mapping
+
+For multi-color SVG assets, the tool rasterizes the SVG for color-family analysis, then maps the dominant visible color families to the presets you provide in `--multi-color-presets`.
+
+This is intentionally best-effort:
+
+- it works well when the SVG has a small number of strong visible color families
+- tiny anti-alias colors are usually ignored or absorbed
+- if the palette is too fragmented, use `--mode analyze` first and then tune the presets or explicit RGB options
 
 ## Named Art Presets
 

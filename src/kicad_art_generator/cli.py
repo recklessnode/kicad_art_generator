@@ -207,9 +207,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["single", "dual-color", "analyze"],
+        choices=["single", "dual-color", "multi-color", "analyze"],
         default="single",
-        help="Use single-layer conversion, split a two-color raster into one combined footprint, or analyze an image palette",
+        help="Use single-layer conversion, split a two-color image into one combined footprint, map multiple dominant colors, or analyze an image palette",
     )
     parser.add_argument(
         "--yellow-rgb",
@@ -295,6 +295,23 @@ def parse_args() -> argparse.Namespace:
         default=0.02,
         help="Minimum opaque coverage fraction for a cluster to be treated as a strong candidate during analysis",
     )
+    parser.add_argument(
+        "--multi-color-presets",
+        default="silkscreen,copper-exposed,copper-covered,substrate-exposed",
+        help="Comma-separated preset list used by --mode multi-color, in assignment order",
+    )
+    parser.add_argument(
+        "--max-color-count",
+        type=int,
+        default=4,
+        help="Maximum dominant color families to map in multi-color mode",
+    )
+    parser.add_argument(
+        "--svg-render-width",
+        type=int,
+        default=1024,
+        help="Raster render width used when color-analyzing SVG artwork",
+    )
     return parser.parse_args()
 
 
@@ -311,19 +328,10 @@ def main() -> None:
     validate_byte("color-tolerance", args.color_tolerance)
     validate_byte("adjacent-color-tolerance", args.adjacent_color_tolerance)
 
-    if args.mode == "analyze":
-        analyze_image(
-            input_path=input_path,
-            alpha_threshold=alpha_threshold,
-            cluster_tolerance=args.analysis_cluster_tolerance,
-            min_fraction=args.analysis_min_fraction,
-        )
-        return
-
     if not args.output:
-        raise SystemExit("--output is required unless --mode analyze is used.")
+        if args.mode != "analyze":
+            raise SystemExit("--output is required unless --mode analyze is used.")
 
-    output_target = Path(args.output).expanduser().resolve()
     preview_output = (
         Path(args.preview_output).expanduser().resolve() if args.preview_output else None
     )
@@ -337,6 +345,20 @@ def main() -> None:
         pretty_dir = initialize_library_bundle(library_root, args.library_name)
     if pretty_dir is not None:
         ensure_pretty_dir(pretty_dir)
+
+    if args.mode == "analyze":
+        with tempfile.TemporaryDirectory(prefix="kicad-art-analyze-") as tmpdir_name:
+            analyze_image(
+                input_path=input_path,
+                alpha_threshold=alpha_threshold,
+                cluster_tolerance=args.analysis_cluster_tolerance,
+                min_fraction=args.analysis_min_fraction,
+                svg_render_width=args.svg_render_width,
+                tmpdir=Path(tmpdir_name),
+            )
+        return
+
+    output_target = Path(args.output).expanduser().resolve()
 
     target_widths_mm = collect_target_widths_mm(args)
     if not target_widths_mm:
@@ -355,9 +377,22 @@ def main() -> None:
             tmpdir = Path(tmpdir_name)
 
             if args.mode == "dual-color":
-                if input_path.suffix.lower() not in RASTER_SUFFIXES:
-                    raise SystemExit("Dual-color mode currently expects a raster image input.")
                 generate_dual_color_module(
+                    input_path=input_path,
+                    output_path=output_path,
+                    footprint_name=footprint_name,
+                    value=args.value,
+                    target_width_mm=target_width_mm,
+                    height_mm=args.height_mm,
+                    args=args,
+                    tmpdir=tmpdir,
+                    alpha_threshold=alpha_threshold,
+                    preview_output=preview_output_for_target(
+                        preview_output, output_path, target_width_mm, args
+                    ),
+                )
+            elif args.mode == "multi-color":
+                generate_multi_color_module(
                     input_path=input_path,
                     output_path=output_path,
                     footprint_name=footprint_name,
@@ -565,11 +600,15 @@ def analyze_image(
     alpha_threshold: int,
     cluster_tolerance: int,
     min_fraction: float,
+    svg_render_width: int,
+    tmpdir: Path,
 ) -> None:
-    if input_path.suffix.lower() not in RASTER_SUFFIXES:
-        raise SystemExit("Analyze mode currently expects a raster image input.")
-
-    image = Image.open(input_path).convert("RGBA")
+    image, _ = load_work_image(
+        input_path=input_path,
+        max_dimension=max(svg_render_width, 1),
+        svg_render_width=svg_render_width,
+        tmpdir=tmpdir,
+    )
     width, height = image.size
     total_pixels = width * height
     transparent_pixels = sum(1 for *_rgb, alpha in image.getdata() if alpha < alpha_threshold)
@@ -613,6 +652,11 @@ def analyze_image(
         print(f"  color 1: {format_rgb(primary)} -> copper-exposed")
         print(f"  color 2: {format_rgb(secondary)} -> silkscreen")
         print(f"  suggested adjacent-color-tolerance: {max(cluster_tolerance, 48)}")
+    elif mode == "multi":
+        print("Suggested mapping:")
+        print("  multi-color art")
+        for index, (rgb, preset_name) in enumerate(suggestions["mappings"], start=1):
+            print(f"  color {index}: {format_rgb(rgb)} -> {preset_name}")
     else:
         print("Could not find a confident dominant-color mapping.")
         print("Try lowering the background complexity, increasing transparency, or use explicit RGB arguments.")
@@ -680,6 +724,20 @@ def suggest_mappings(
                 "secondary": second.rgb,
                 "background": background,
             }
+
+    if len(strong) > 4:
+        return {"mode": "ambiguous", "background": background}
+
+    if len(top) >= 3:
+        preset_names = ["silkscreen", "copper-exposed", "copper-covered", "substrate-exposed"]
+        return {
+            "mode": "multi",
+            "mappings": [
+                (cluster.rgb, preset_names[index])
+                for index, cluster in enumerate(top[: len(preset_names)])
+            ],
+            "background": background,
+        }
 
     if len(top) >= 1:
         first = top[0]
@@ -816,7 +874,12 @@ def generate_dual_color_module(
 ) -> None:
     yellow_rgb = parse_rgb_triplet(args.yellow_rgb)
     white_rgb = parse_rgb_triplet(args.white_rgb)
-    image, size = open_and_scale_image(input_path, max(1, args.max_dimension))
+    image, size = load_work_image(
+        input_path=input_path,
+        max_dimension=max(1, args.max_dimension),
+        svg_render_width=args.svg_render_width,
+        tmpdir=tmpdir,
+    )
 
     color_matches = [
         ColorMatch("yellow", yellow_rgb, args.copper_layer),
@@ -891,6 +954,101 @@ def generate_dual_color_module(
     )
 
 
+def generate_multi_color_module(
+    input_path: Path,
+    output_path: Path,
+    footprint_name: str,
+    value: str,
+    target_width_mm: float | None,
+    height_mm: float | None,
+    args: argparse.Namespace,
+    tmpdir: Path,
+    alpha_threshold: int,
+    preview_output: Path | None,
+) -> None:
+    image, size = load_work_image(
+        input_path=input_path,
+        max_dimension=max(1, args.max_dimension),
+        svg_render_width=args.svg_render_width,
+        tmpdir=tmpdir,
+    )
+    preset_names = [part.strip() for part in args.multi_color_presets.split(",") if part.strip()]
+    if not preset_names:
+        raise SystemExit("--multi-color-presets must contain at least one preset name.")
+    presets = [get_art_preset(name) for name in preset_names[: max(1, args.max_color_count)]]
+
+    chosen_clusters = choose_multi_color_clusters(
+        image=image,
+        alpha_threshold=alpha_threshold,
+        cluster_tolerance=args.analysis_cluster_tolerance,
+        min_fraction=args.analysis_min_fraction,
+        max_color_count=min(args.max_color_count, len(presets)),
+    )
+    if not chosen_clusters:
+        raise SystemExit("Could not find enough dominant visible colors for multi-color mapping.")
+
+    palette_sets = select_palette_sets_for_seeds(
+        image=image,
+        seeds=[cluster.rgb for cluster in chosen_clusters],
+        alpha_threshold=alpha_threshold,
+        base_tolerance=args.color_tolerance,
+        adjacent_tolerance=args.adjacent_color_tolerance,
+        adjacent_shade_limit=args.adjacent_shade_limit,
+    )
+
+    module_sections: list[str] = []
+    preview_layers: list[tuple[list[list[tuple[int, int]]], tuple[int, int, int, int]]] = []
+    scale_factor = compute_scale_factor(
+        size=size,
+        dpi=args.dpi,
+        width_mm=target_width_mm,
+        height_mm=height_mm,
+    )
+
+    for index, cluster in enumerate(chosen_clusters):
+        preset = presets[index]
+        rows = extract_color_rows(
+            image=image,
+            target_rgb=cluster.rgb,
+            tolerance=args.color_tolerance,
+            alpha_threshold=alpha_threshold,
+            accepted_colors=palette_sets.get(cluster.rgb),
+        )
+        rectangles = merge_row_runs(rows)
+        if not rectangles:
+            continue
+        svg_path = tmpdir / f"multi_{index}.svg"
+        write_svg_rects(svg_path, int(size.width_px), int(size.height_px), rectangles)
+        preview_layers.append((rows, preset.preview_color))
+
+        for layer in preset.layers:
+            temp_module = tmpdir / f"multi_{index}_{layer.replace('.', '_')}.kicad_mod"
+            run_svg2mod(
+                svg_input=svg_path,
+                output_path=temp_module,
+                footprint_name=footprint_name,
+                value=value,
+                layer=layer,
+                center=args.center,
+                precision=args.precision,
+                dpi=args.dpi,
+                scale_factor=scale_factor,
+                verbose=args.verbose,
+            )
+            module_sections.extend(extract_module_sections(temp_module))
+
+    if not module_sections:
+        raise SystemExit("Multi-color mapping did not produce any geometry.")
+    if preview_output is not None:
+        write_multi_preview_png(
+            preview_layers=preview_layers,
+            width=int(size.width_px),
+            height=int(size.height_px),
+            output_path=preview_output,
+        )
+    write_combined_module(output_path, footprint_name, value, module_sections)
+
+
 def parse_rgb_triplet(value: str) -> tuple[int, int, int]:
     parts = [part.strip() for part in value.split(",")]
     if len(parts) != 3:
@@ -922,6 +1080,34 @@ def open_and_scale_image(input_path: Path, max_dimension: int) -> tuple[Image.Im
     return image, ArtworkSize(width_px=float(width), height_px=float(height))
 
 
+def load_work_image(
+    input_path: Path,
+    max_dimension: int,
+    svg_render_width: int,
+    tmpdir: Path,
+) -> tuple[Image.Image, ArtworkSize]:
+    if input_path.suffix.lower() in RASTER_SUFFIXES:
+        return open_and_scale_image(input_path, max_dimension)
+    if input_path.suffix.lower() == ".svg":
+        raster_path = tmpdir / f"{input_path.stem}_render.png"
+        render_svg_to_png(input_path, raster_path, svg_render_width)
+        return open_and_scale_image(raster_path, max_dimension)
+    raise SystemExit(f"Unsupported input type for image-based processing: {input_path.suffix}")
+
+
+def render_svg_to_png(input_path: Path, output_path: Path, render_width: int) -> None:
+    command = [
+        "rsvg-convert",
+        "--keep-aspect-ratio",
+        "--width",
+        str(render_width),
+        "-o",
+        str(output_path),
+        str(input_path),
+    ]
+    subprocess.run(command, check=True)
+
+
 def select_dual_color_palette_sets(
     image: Image.Image,
     matches: list[ColorMatch],
@@ -930,6 +1116,25 @@ def select_dual_color_palette_sets(
     adjacent_tolerance: int,
     adjacent_shade_limit: int,
 ) -> dict[str, set[tuple[int, int, int]]]:
+    accepted_by_rgb = select_palette_sets_for_seeds(
+        image=image,
+        seeds=[match.rgb for match in matches],
+        alpha_threshold=alpha_threshold,
+        base_tolerance=base_tolerance,
+        adjacent_tolerance=adjacent_tolerance,
+        adjacent_shade_limit=adjacent_shade_limit,
+    )
+    return {match.name: accepted_by_rgb.get(match.rgb, set()) for match in matches}
+
+
+def select_palette_sets_for_seeds(
+    image: Image.Image,
+    seeds: list[tuple[int, int, int]],
+    alpha_threshold: int,
+    base_tolerance: int,
+    adjacent_tolerance: int,
+    adjacent_shade_limit: int,
+) -> dict[tuple[int, int, int], set[tuple[int, int, int]]]:
     palette = Counter(
         (red, green, blue)
         for red, green, blue, alpha in image.getdata()
@@ -937,30 +1142,45 @@ def select_dual_color_palette_sets(
     )
     ranked_colors = [rgb for rgb, _count in palette.most_common()]
 
-    accepted: dict[str, set[tuple[int, int, int]]] = {match.name: set() for match in matches}
-    extra_counts: dict[str, int] = {match.name: 0 for match in matches}
+    accepted: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {seed: set() for seed in seeds}
+    extra_counts: dict[tuple[int, int, int], int] = {seed: 0 for seed in seeds}
 
     for rgb in ranked_colors:
         distances = sorted(
-            ((color_distance_max(rgb, match.rgb), match) for match in matches),
+            ((color_distance_max(rgb, seed), seed) for seed in seeds),
             key=lambda item: item[0],
         )
-        nearest_distance, nearest_match = distances[0]
+        nearest_distance, nearest_seed = distances[0]
         second_distance = distances[1][0] if len(distances) > 1 else 255
 
         if nearest_distance <= base_tolerance:
-            accepted[nearest_match.name].add(rgb)
+            accepted[nearest_seed].add(rgb)
             continue
 
         if (
             nearest_distance <= adjacent_tolerance
-            and extra_counts[nearest_match.name] < adjacent_shade_limit
+            and extra_counts[nearest_seed] < adjacent_shade_limit
             and second_distance - nearest_distance >= 8
         ):
-            accepted[nearest_match.name].add(rgb)
-            extra_counts[nearest_match.name] += 1
+            accepted[nearest_seed].add(rgb)
+            extra_counts[nearest_seed] += 1
 
     return accepted
+
+
+def choose_multi_color_clusters(
+    image: Image.Image,
+    alpha_threshold: int,
+    cluster_tolerance: int,
+    min_fraction: float,
+    max_color_count: int,
+) -> list[PaletteCluster]:
+    clusters = cluster_opaque_palette(image, alpha_threshold, cluster_tolerance)
+    opaque_pixels = sum(cluster.count for cluster in clusters)
+    background = infer_background_color(clusters, opaque_pixels, 0, opaque_pixels)
+    candidates = [cluster for cluster in clusters if cluster.rgb != background]
+    strong = [cluster for cluster in candidates if cluster.count / opaque_pixels >= min_fraction]
+    return strong[:max_color_count]
 
 
 def extract_color_rows(

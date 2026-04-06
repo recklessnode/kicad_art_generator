@@ -15,3 +15,4 @@
 - Improved dual-color extraction so it absorbs adjacent shades around the primary colors, fixing missing darker-green text in the Cholla logo workflow.
 - Added an `analyze` mode that inspects dominant opaque color clusters, suggests mappings, and explicitly warns when an image palette is too ambiguous.
 - Added a library-bundle export flow that creates a named `.pretty` library plus KiCad import metadata, and expanded CLI help with real-world multi-line examples.
+- Added best-effort multi-color SVG support by rasterizing SVG input for palette analysis and mapping dominant visible color families to preset PCB art finishes.
