@@ -13,3 +13,4 @@
 - Added dual-color preview generation and validated the `Cholla Energy.png` logo as exposed ENIG-style yellow copper plus green silkscreen.
 - Added direct `.pretty` export support so generated footprints can be written straight into a KiCad footprint library.
 - Improved dual-color extraction so it absorbs adjacent shades around the primary colors, fixing missing darker-green text in the Cholla logo workflow.
+- Added an `analyze` mode that inspects dominant opaque color clusters, suggests mappings, and explicitly warns when an image palette is too ambiguous.

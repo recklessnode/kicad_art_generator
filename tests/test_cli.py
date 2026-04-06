@@ -252,3 +252,64 @@ def test_export_to_pretty_dir(tmp_path: Path) -> None:
     exported = pretty_dir / "logo.kicad_mod"
     assert exported.exists()
     assert "(module logo" in exported.read_text(encoding="utf-8")
+
+
+def test_analyze_mode_suggests_dual_color_mapping(tmp_path: Path) -> None:
+    image_path = tmp_path / "analyze_dual.png"
+
+    image = Image.new("RGBA", (40, 20), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((2, 2, 17, 17), fill=(246, 226, 0, 255))
+    draw.rectangle((22, 2, 37, 17), fill=(1, 105, 56, 255))
+    image.save(image_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--mode",
+            "analyze",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert "Dominant opaque color clusters:" in result.stdout
+    assert "Suggested mapping:" in result.stdout
+    assert "dual-color art" in result.stdout
+    assert "246,226,0 -> copper-exposed" in result.stdout
+    assert "1,105,56 -> silkscreen" in result.stdout
+
+
+def test_analyze_mode_complains_on_ambiguous_palette(tmp_path: Path) -> None:
+    image_path = tmp_path / "ambiguous.png"
+
+    image = Image.new("RGBA", (30, 10), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 9, 9), fill=(200, 0, 0, 255))
+    draw.rectangle((10, 0, 19, 9), fill=(0, 180, 0, 255))
+    draw.rectangle((20, 0, 29, 9), fill=(0, 0, 200, 255))
+    image.save(image_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--mode",
+            "analyze",
+            "--analysis-min-fraction",
+            "0.2",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "Could not find a confident dominant-color mapping." in result.stdout

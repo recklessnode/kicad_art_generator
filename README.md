@@ -58,6 +58,13 @@ Generate a footprint from SVG:
 kicad-art examples/bitcoin_b.svg --output output/bitcoin_b.kicad_mod --layer F.Cu --width-mm 20
 ```
 
+Analyze an image first and get a suggested mapping:
+
+```bash
+. .venv/bin/activate
+kicad-art "Cholla Energy.png" --mode analyze
+```
+
 Generate a footprint from a bitmap:
 
 ```bash
@@ -178,6 +185,7 @@ kicad-art cholla_cactus.png \
 - Supports single-layer raster extraction by retaining a chosen foreground color and explicitly ignoring a background color
 - Can generate a preview PNG on a green board-like background using the target layer color
 - Supports named art presets that emit the PCB layers needed for visible art finishes
+- Can analyze an image palette and suggest likely single-layer or dual-color mappings
 - Lets you target a specific KiCad layer such as `F.Cu`, `B.Cu`, `F.SilkS`, or `B.Mask`
 - Lets you size the output by width or height in millimeters
 - Supports preset width generation in inches for reusable art families
@@ -196,6 +204,7 @@ Main options:
 
 - `--output`: output `.kicad_mod` path
 - `--mode dual-color`: split yellow and white into a single combined footprint
+- `--mode analyze`: inspect the image palette and print suggested mappings without generating a footprint
 - `--layer`: KiCad layer to force the artwork onto
 - `--art-preset`: named single-layer art behavior such as `silkscreen`, `copper-exposed`, `copper-covered`, or `substrate-exposed`
 - `--width-mm`: target width in millimeters
@@ -223,8 +232,23 @@ Main options:
 - `--background-rgb`: explicitly ignore this color in single-layer raster mode
 - `--preview-output`: write a PNG preview of the retained artwork in the chosen layer color
 - `--pretty-dir`: copy generated `.kicad_mod` files directly into a target `.pretty` library directory
+- `--analysis-cluster-tolerance`: merge nearby opaque colors into shared palette clusters during analysis
+- `--analysis-min-fraction`: minimum opaque coverage required for a cluster to count as a strong analysis candidate
 
 Run `kicad-art --help` to see the full current option set.
+
+## Analysis Mode
+
+Use `--mode analyze` when you want the tool to inspect an image before generation.
+
+It reports:
+
+- image size and transparency
+- dominant opaque color clusters
+- a suggested background color to ignore when one is obvious
+- a suggested `single-layer` or `dual-color` workflow when confidence is high
+
+If the palette is too ambiguous, the tool exits with a warning instead of pretending it found a clean mapping.
 
 ## Named Art Presets
 

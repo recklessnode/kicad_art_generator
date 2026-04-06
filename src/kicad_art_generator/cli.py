@@ -52,6 +52,12 @@ class ArtPreset:
     preview_color: tuple[int, int, int, int]
 
 
+@dataclass(frozen=True)
+class PaletteCluster:
+    rgb: tuple[int, int, int]
+    count: int
+
+
 ART_PRESETS = {
     "silkscreen": ArtPreset("silkscreen", ("F.SilkS",), PREVIEW_WHITE),
     "back-silkscreen": ArtPreset("back-silkscreen", ("B.SilkS",), (220, 220, 220, 255)),
@@ -71,7 +77,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("input", help="Input SVG or raster image path")
     parser.add_argument(
         "--output",
-        required=True,
         help="Output .kicad_mod path, or an output directory when using --preset-sizes-in",
     )
     parser.add_argument(
@@ -167,9 +172,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["single", "dual-color"],
+        choices=["single", "dual-color", "analyze"],
         default="single",
-        help="Use single-layer conversion or split a two-color raster into one combined footprint",
+        help="Use single-layer conversion, split a two-color raster into one combined footprint, or analyze an image palette",
     )
     parser.add_argument(
         "--yellow-rgb",
@@ -235,6 +240,18 @@ def parse_args() -> argparse.Namespace:
         "--pretty-dir",
         help="Optional target .pretty directory to receive the generated .kicad_mod files",
     )
+    parser.add_argument(
+        "--analysis-cluster-tolerance",
+        type=int,
+        default=24,
+        help="Color distance used to merge nearby opaque colors into palette clusters during analysis",
+    )
+    parser.add_argument(
+        "--analysis-min-fraction",
+        type=float,
+        default=0.02,
+        help="Minimum opaque coverage fraction for a cluster to be treated as a strong candidate during analysis",
+    )
     return parser.parse_args()
 
 
@@ -242,7 +259,6 @@ def main() -> None:
     args = parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
-    output_target = Path(args.output).expanduser().resolve()
 
     if not input_path.exists():
         raise SystemExit(f"Input file not found: {input_path}")
@@ -251,6 +267,20 @@ def main() -> None:
     alpha_threshold = validate_byte("alpha-threshold", args.alpha_threshold)
     validate_byte("color-tolerance", args.color_tolerance)
     validate_byte("adjacent-color-tolerance", args.adjacent_color_tolerance)
+
+    if args.mode == "analyze":
+        analyze_image(
+            input_path=input_path,
+            alpha_threshold=alpha_threshold,
+            cluster_tolerance=args.analysis_cluster_tolerance,
+            min_fraction=args.analysis_min_fraction,
+        )
+        return
+
+    if not args.output:
+        raise SystemExit("--output is required unless --mode analyze is used.")
+
+    output_target = Path(args.output).expanduser().resolve()
     preview_output = (
         Path(args.preview_output).expanduser().resolve() if args.preview_output else None
     )
@@ -438,6 +468,164 @@ def export_to_pretty_dir(output_path: Path, pretty_dir: Path) -> Path:
     destination = pretty_dir / output_path.name
     shutil.copy2(output_path, destination)
     return destination
+
+
+def analyze_image(
+    input_path: Path,
+    alpha_threshold: int,
+    cluster_tolerance: int,
+    min_fraction: float,
+) -> None:
+    if input_path.suffix.lower() not in RASTER_SUFFIXES:
+        raise SystemExit("Analyze mode currently expects a raster image input.")
+
+    image = Image.open(input_path).convert("RGBA")
+    width, height = image.size
+    total_pixels = width * height
+    transparent_pixels = sum(1 for *_rgb, alpha in image.getdata() if alpha < alpha_threshold)
+    opaque_pixels = total_pixels - transparent_pixels
+
+    print(f"Image: {input_path}")
+    print(f"Size: {width}x{height}")
+    print(f"Transparent pixels: {transparent_pixels} ({transparent_pixels / total_pixels:.1%})")
+    print(f"Opaque pixels: {opaque_pixels} ({opaque_pixels / total_pixels:.1%})")
+
+    if opaque_pixels <= 0:
+        raise SystemExit("Analysis failed: no opaque pixels above the alpha threshold were found.")
+
+    clusters = cluster_opaque_palette(image, alpha_threshold, cluster_tolerance)
+    print("Dominant opaque color clusters:")
+    for index, cluster in enumerate(clusters[:6], start=1):
+        print(f"  {index}. rgb={format_rgb(cluster.rgb)} pixels={cluster.count} coverage={cluster.count / opaque_pixels:.1%}")
+
+    suggestions = suggest_mappings(clusters, opaque_pixels, transparent_pixels, total_pixels, min_fraction)
+    if suggestions["background"] is not None:
+        print(f"Suggested background/ignore color: {format_rgb(suggestions['background'])}")
+    elif transparent_pixels > 0:
+        print("Suggested background/ignore color: transparent")
+    else:
+        print("Suggested background/ignore color: none confidently identified")
+
+    mode = suggestions["mode"]
+    if mode == "single":
+        foreground = suggestions["foreground"]
+        print("Suggested mapping:")
+        print("  single-layer art")
+        print(f"  retain {format_rgb(foreground)}")
+        print("  suggested preset: silkscreen")
+        if suggestions["background"] is not None:
+            print(f"  ignore {format_rgb(suggestions['background'])}")
+    elif mode == "dual":
+        primary = suggestions["primary"]
+        secondary = suggestions["secondary"]
+        print("Suggested mapping:")
+        print("  dual-color art")
+        print(f"  color 1: {format_rgb(primary)} -> copper-exposed")
+        print(f"  color 2: {format_rgb(secondary)} -> silkscreen")
+        print(f"  suggested adjacent-color-tolerance: {max(cluster_tolerance, 48)}")
+    else:
+        print("Could not find a confident dominant-color mapping.")
+        print("Try lowering the background complexity, increasing transparency, or use explicit RGB arguments.")
+        raise SystemExit(2)
+
+
+def cluster_opaque_palette(
+    image: Image.Image,
+    alpha_threshold: int,
+    cluster_tolerance: int,
+) -> list[PaletteCluster]:
+    palette = Counter(
+        (red, green, blue)
+        for red, green, blue, alpha in image.getdata()
+        if alpha >= alpha_threshold
+    )
+    clusters: list[PaletteCluster] = []
+
+    for rgb, count in palette.most_common():
+        for index, cluster in enumerate(clusters):
+            if color_distance_max(rgb, cluster.rgb) <= cluster_tolerance:
+                if count > cluster.count:
+                    clusters[index] = PaletteCluster(rgb=rgb, count=cluster.count + count)
+                else:
+                    clusters[index] = PaletteCluster(rgb=cluster.rgb, count=cluster.count + count)
+                break
+        else:
+            clusters.append(PaletteCluster(rgb=rgb, count=count))
+
+    return sorted(clusters, key=lambda cluster: cluster.count, reverse=True)
+
+
+def suggest_mappings(
+    clusters: list[PaletteCluster],
+    opaque_pixels: int,
+    transparent_pixels: int,
+    total_pixels: int,
+    min_fraction: float,
+) -> dict[str, object]:
+    background = infer_background_color(clusters, opaque_pixels, transparent_pixels, total_pixels)
+    candidates = [cluster for cluster in clusters if cluster.rgb != background]
+    strong = [cluster for cluster in candidates if cluster.count / opaque_pixels >= min_fraction]
+    top = strong[:4]
+    adjacent_tolerance = 64
+
+    if len(top) >= 2:
+        first, second = top[0], top[1]
+        third_party_clusters = [
+            cluster
+            for cluster in top[2:]
+            if min(
+                color_distance_max(cluster.rgb, first.rgb),
+                color_distance_max(cluster.rgb, second.rgb),
+            )
+            > adjacent_tolerance
+        ]
+        if (
+            first.count / opaque_pixels >= 0.08
+            and second.count / opaque_pixels >= 0.08
+            and not third_party_clusters
+        ):
+            return {
+                "mode": "dual",
+                "primary": first.rgb,
+                "secondary": second.rgb,
+                "background": background,
+            }
+
+    if len(top) >= 1:
+        first = top[0]
+        second_fraction = top[1].count / opaque_pixels if len(top) > 1 else 0.0
+        min_single_fraction = 0.05 if background is not None else 0.12
+        if first.count / opaque_pixels >= min_single_fraction and second_fraction < 0.25:
+            return {
+                "mode": "single",
+                "foreground": first.rgb,
+                "background": background,
+            }
+
+    return {"mode": "ambiguous", "background": background}
+
+
+def infer_background_color(
+    clusters: list[PaletteCluster],
+    opaque_pixels: int,
+    transparent_pixels: int,
+    total_pixels: int,
+) -> tuple[int, int, int] | None:
+    if transparent_pixels / total_pixels >= 0.2:
+        return None
+    if not clusters:
+        return None
+    top = clusters[0]
+    if top.count / opaque_pixels < 0.45:
+        return None
+    luminance = 0.299 * top.rgb[0] + 0.587 * top.rgb[1] + 0.114 * top.rgb[2]
+    if luminance >= 220:
+        return top.rgb
+    return None
+
+
+def format_rgb(rgb: tuple[int, int, int]) -> str:
+    return ",".join(str(channel) for channel in rgb)
 
 
 def validate_byte(name: str, value: int) -> int:
