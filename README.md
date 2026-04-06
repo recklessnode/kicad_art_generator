@@ -96,6 +96,27 @@ kicad-art "Cholla Energy.png" \
   --center
 ```
 
+If a logo uses close shades of the same color, widen the adjacent-shade match so text and outlines are retained:
+
+```bash
+. .venv/bin/activate
+kicad-art "Cholla Energy.png" \
+  --mode dual-color \
+  --output output/cholla_energy_enig_v2.kicad_mod \
+  --footprint-name cholla_energy_enig_v2 \
+  --width-mm 50 \
+  --yellow-rgb 246,226,0 \
+  --white-rgb 1,105,56 \
+  --yellow-preset copper-exposed \
+  --white-preset silkscreen \
+  --color-tolerance 24 \
+  --adjacent-color-tolerance 64 \
+  --adjacent-shade-limit 16 \
+  --alpha-threshold 32 \
+  --preview-output output/cholla_energy_enig_v2_preview.png \
+  --center
+```
+
 Generate the same style at fully custom parametric sizes:
 
 ```bash
@@ -192,6 +213,8 @@ Main options:
 - `--yellow-rgb`: RGB triple for copper art in dual-color mode
 - `--white-rgb`: RGB triple for silkscreen art in dual-color mode
 - `--color-tolerance`: matching tolerance for the dual-color split
+- `--adjacent-color-tolerance`: broader tolerance for absorbing nearby shades around each matched dual-color family
+- `--adjacent-shade-limit`: maximum number of nearby palette shades to absorb for each dual-color family
 - `--copper-layer`: target copper layer, default `F.Cu`
 - `--silkscreen-layer`: target silkscreen layer, default `F.SilkS`
 - `--yellow-preset`: named preset for the first matched color in dual-color mode
@@ -224,6 +247,8 @@ Run `kicad-art --help` to see the full current option set.
 The copper and silkscreen geometry is embedded into the footprint itself, which keeps the art durable and reusable across board designs.
 
 When using copper for visible art, prefer `copper-exposed` so the tool emits both the copper feature and the matching solder-mask opening. If you want a darker green tone instead, use `copper-covered` so the copper remains under solder mask.
+
+For logos that use multiple close shades of green, yellow, or another brand color, tune `--adjacent-color-tolerance` upward so the tool keeps adjacent shades that belong to the same visual family while still dropping unrelated colors.
 
 For black-on-white line art, a simpler workflow works well:
 

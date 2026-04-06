@@ -8,6 +8,7 @@ import sys
 import tempfile
 import uuid
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -187,6 +188,18 @@ def parse_args() -> argparse.Namespace:
         help="Per-pixel RGB distance tolerance for dual-color matching",
     )
     parser.add_argument(
+        "--adjacent-color-tolerance",
+        type=int,
+        default=64,
+        help="Wider tolerance for absorbing nearby shades around each primary dual-color match",
+    )
+    parser.add_argument(
+        "--adjacent-shade-limit",
+        type=int,
+        default=16,
+        help="Maximum number of extra nearby palette shades to absorb for each dual-color target",
+    )
+    parser.add_argument(
         "--copper-layer",
         default="F.Cu",
         help="KiCad layer for the yellow art in dual-color mode",
@@ -237,6 +250,7 @@ def main() -> None:
     threshold = validate_byte("threshold", args.threshold)
     alpha_threshold = validate_byte("alpha-threshold", args.alpha_threshold)
     validate_byte("color-tolerance", args.color_tolerance)
+    validate_byte("adjacent-color-tolerance", args.adjacent_color_tolerance)
     preview_output = (
         Path(args.preview_output).expanduser().resolve() if args.preview_output else None
     )
@@ -530,6 +544,14 @@ def generate_dual_color_module(
         ColorMatch("yellow", yellow_rgb, args.copper_layer),
         ColorMatch("white", white_rgb, args.silkscreen_layer),
     ]
+    palette_color_sets = select_dual_color_palette_sets(
+        image=image,
+        matches=color_matches,
+        alpha_threshold=alpha_threshold,
+        base_tolerance=args.color_tolerance,
+        adjacent_tolerance=args.adjacent_color_tolerance,
+        adjacent_shade_limit=args.adjacent_shade_limit,
+    )
 
     module_sections: list[str] = []
     preview_layers: list[tuple[list[list[tuple[int, int]]], tuple[int, int, int, int]]] = []
@@ -542,6 +564,7 @@ def generate_dual_color_module(
             target_rgb=match.rgb,
             tolerance=args.color_tolerance,
             alpha_threshold=alpha_threshold,
+            accepted_colors=palette_color_sets.get(match.name),
         )
         rectangles = merge_row_runs(rows)
         if not rectangles:
@@ -621,11 +644,53 @@ def open_and_scale_image(input_path: Path, max_dimension: int) -> tuple[Image.Im
     return image, ArtworkSize(width_px=float(width), height_px=float(height))
 
 
+def select_dual_color_palette_sets(
+    image: Image.Image,
+    matches: list[ColorMatch],
+    alpha_threshold: int,
+    base_tolerance: int,
+    adjacent_tolerance: int,
+    adjacent_shade_limit: int,
+) -> dict[str, set[tuple[int, int, int]]]:
+    palette = Counter(
+        (red, green, blue)
+        for red, green, blue, alpha in image.getdata()
+        if alpha >= alpha_threshold
+    )
+    ranked_colors = [rgb for rgb, _count in palette.most_common()]
+
+    accepted: dict[str, set[tuple[int, int, int]]] = {match.name: set() for match in matches}
+    extra_counts: dict[str, int] = {match.name: 0 for match in matches}
+
+    for rgb in ranked_colors:
+        distances = sorted(
+            ((color_distance_max(rgb, match.rgb), match) for match in matches),
+            key=lambda item: item[0],
+        )
+        nearest_distance, nearest_match = distances[0]
+        second_distance = distances[1][0] if len(distances) > 1 else 255
+
+        if nearest_distance <= base_tolerance:
+            accepted[nearest_match.name].add(rgb)
+            continue
+
+        if (
+            nearest_distance <= adjacent_tolerance
+            and extra_counts[nearest_match.name] < adjacent_shade_limit
+            and second_distance - nearest_distance >= 8
+        ):
+            accepted[nearest_match.name].add(rgb)
+            extra_counts[nearest_match.name] += 1
+
+    return accepted
+
+
 def extract_color_rows(
     image: Image.Image,
     target_rgb: tuple[int, int, int],
     tolerance: int,
     alpha_threshold: int,
+    accepted_colors: set[tuple[int, int, int]] | None = None,
 ) -> list[list[tuple[int, int]]]:
     pixels = image.load()
     width, height = image.size
@@ -636,12 +701,12 @@ def extract_color_rows(
         run_start: int | None = None
         for x in range(width):
             red, green, blue, alpha = pixels[x, y]
-            channel_delta = max(
-                abs(red - target_rgb[0]),
-                abs(green - target_rgb[1]),
-                abs(blue - target_rgb[2]),
-            )
-            filled = alpha >= alpha_threshold and channel_delta <= tolerance
+            pixel_rgb = (red, green, blue)
+            channel_delta = color_distance_max(pixel_rgb, target_rgb)
+            if accepted_colors is not None:
+                filled = alpha >= alpha_threshold and pixel_rgb in accepted_colors
+            else:
+                filled = alpha >= alpha_threshold and channel_delta <= tolerance
             if filled and run_start is None:
                 run_start = x
             elif not filled and run_start is not None:

@@ -93,6 +93,52 @@ def test_dual_color_generates_combined_layers_and_presets(tmp_path: Path) -> Non
     assert (tmp_path / "badge_art_2in_preview.png").exists()
 
 
+def test_dual_color_absorbs_adjacent_shades(tmp_path: Path) -> None:
+    image_path = tmp_path / "shades.png"
+    output = tmp_path / "shades.kicad_mod"
+
+    image = Image.new("RGBA", (24, 16), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((1, 2, 6, 13), fill=(246, 226, 0, 255))
+    draw.rectangle((9, 2, 14, 13), fill=(1, 105, 56, 255))
+    draw.rectangle((16, 2, 22, 13), fill=(14, 58, 34, 255))
+    image.save(image_path)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--mode",
+            "dual-color",
+            "--output",
+            str(output),
+            "--width-mm",
+            "16",
+            "--yellow-rgb",
+            "246,226,0",
+            "--white-rgb",
+            "1,105,56",
+            "--yellow-preset",
+            "copper-exposed",
+            "--white-preset",
+            "silkscreen",
+            "--color-tolerance",
+            "24",
+            "--adjacent-color-tolerance",
+            "64",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "(layer F.Cu)" in text
+    assert "(layer F.Mask)" in text
+    assert text.count("(layer F.SilkS)") >= 2
+
+
 def test_single_layer_color_match_and_preview(tmp_path: Path) -> None:
     image_path = tmp_path / "cactus_like.png"
     output = tmp_path / "cactus.kicad_mod"
