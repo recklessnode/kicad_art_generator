@@ -77,6 +77,30 @@ kicad-art art.png \
   --center
 ```
 
+Generate the same style at fully custom parametric sizes:
+
+```bash
+. .venv/bin/activate
+kicad-art art.png \
+  --mode dual-color \
+  --output output/ \
+  --footprint-name energy_path \
+  --sizes-in 0.75,1.25,2.5 \
+  --center
+```
+
+Or in millimeters:
+
+```bash
+. .venv/bin/activate
+kicad-art art.png \
+  --mode dual-color \
+  --output output/ \
+  --footprint-name energy_path \
+  --sizes-mm 18,32,48 \
+  --center
+```
+
 Generate single-layer black-on-white art, ignore the white background, and emit a preview:
 
 ```bash
@@ -123,6 +147,8 @@ Main options:
 - `--height-mm`: target height in millimeters
 - `--size-in`: target width in inches
 - `--preset-sizes-in`: comma-separated inch presets, for example `1,2,4`
+- `--sizes-in`: comma-separated custom inch sizes
+- `--sizes-mm`: comma-separated custom millimeter sizes
 - `--footprint-name`: footprint name inside the KiCad module
 - `--value`: footprint value field
 - `--threshold`: grayscale threshold for raster inputs
@@ -141,7 +167,7 @@ Main options:
 ## Recommended workflow
 
 1. Prepare a clean two-color source image in GIMP or Inkscape, using one yellow tone and one white tone with transparency elsewhere.
-2. Run `kicad-art` in `dual-color` mode with `--preset-sizes-in 1,2,4`.
+2. Run `kicad-art` in `dual-color` mode with either `--preset-sizes-in 1,2,4` or your own `--sizes-in` / `--sizes-mm` list.
 3. Copy the generated `.kicad_mod` files into a `.pretty` library in your KiCad project or shared asset repo.
 4. Place the resulting art footprint like any other footprint in PCB Editor.
 

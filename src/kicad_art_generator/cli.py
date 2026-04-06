@@ -87,8 +87,16 @@ def parse_args() -> argparse.Namespace:
         help="Target output width in inches",
     )
     parser.add_argument(
+        "--sizes-in",
+        help="Comma-separated custom output widths in inches, for example 0.75,1.5,3",
+    )
+    parser.add_argument(
         "--preset-sizes-in",
         help="Comma-separated width presets in inches, for example 1,2,4",
+    )
+    parser.add_argument(
+        "--sizes-mm",
+        help="Comma-separated custom output widths in millimeters, for example 12.5,25,37.5",
     )
     parser.add_argument(
         "--threshold",
@@ -204,7 +212,7 @@ def main() -> None:
     if not target_widths_mm:
         target_widths_mm = [None]
 
-    if args.preset_sizes_in:
+    if uses_directory_output(args):
         output_target.mkdir(parents=True, exist_ok=True)
     else:
         output_target.parent.mkdir(parents=True, exist_ok=True)
@@ -260,7 +268,11 @@ def main() -> None:
 def collect_target_widths_mm(args: argparse.Namespace) -> list[float | None]:
     widths_mm: list[float | None] = []
 
-    if args.preset_sizes_in:
+    if args.sizes_mm:
+        widths_mm.extend(parse_number_list(args.sizes_mm))
+    elif args.sizes_in:
+        widths_mm.extend(value * 25.4 for value in parse_number_list(args.sizes_in))
+    elif args.preset_sizes_in:
         widths_mm.extend(value * 25.4 for value in parse_number_list(args.preset_sizes_in))
     elif args.size_in is not None:
         widths_mm.append(args.size_in * 25.4)
@@ -275,7 +287,7 @@ def resolve_output_path(
     target_width_mm: float | None,
     args: argparse.Namespace,
 ) -> Path:
-    if not args.preset_sizes_in:
+    if not uses_directory_output(args):
         return output_target
 
     width_in = target_width_mm / 25.4 if target_width_mm is not None else 0.0
@@ -289,13 +301,17 @@ def resolve_footprint_name(
     target_width_mm: float | None,
     args: argparse.Namespace,
 ) -> str:
-    if not args.preset_sizes_in:
+    if not uses_directory_output(args):
         return args.footprint_name or output_path.stem
 
     width_in = target_width_mm / 25.4 if target_width_mm is not None else 0.0
     width_label = format_size_label(width_in)
     base_name = args.footprint_name or Path(args.input).stem
     return f"{base_name}_{width_label}"
+
+
+def uses_directory_output(args: argparse.Namespace) -> bool:
+    return bool(args.preset_sizes_in or args.sizes_in or args.sizes_mm)
 
 
 def preview_output_for_target(
@@ -307,7 +323,7 @@ def preview_output_for_target(
     del target_width_mm
     if preview_output is None:
         return None
-    if not args.preset_sizes_in:
+    if not uses_directory_output(args):
         return preview_output
     return preview_output.parent / f"{output_path.stem}_preview.png"
 

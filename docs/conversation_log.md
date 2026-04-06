@@ -8,3 +8,4 @@
 - Extended the workflow to match the original goal: two-color PNG processing with yellow mapped to copper, white mapped to silkscreen, combined into a single reusable footprint, with 1 inch, 2 inch, and 4 inch preset generation.
 - Added a simpler single-layer raster workflow with explicit foreground and background color matching, plus green-board preview PNG output.
 - Validated the real `cholla_cactus.png` asset as black art on `F.SilkS` while ignoring the white background.
+- Extended sizing so output generation is explicitly parametric for custom batch sizes in either inches or millimeters, not just the default preset-size workflow.
