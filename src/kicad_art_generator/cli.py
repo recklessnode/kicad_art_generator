@@ -5,6 +5,7 @@ import math
 import subprocess
 import sys
 import tempfile
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,15 +24,22 @@ class ArtworkSize:
     height_px: float
 
 
+@dataclass
+class ColorMatch:
+    name: str
+    rgb: tuple[int, int, int]
+    layer: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate KiCad art footprints from SVG or raster artwork."
+        description="Generate KiCad art footprints from SVG or two-color raster artwork."
     )
     parser.add_argument("input", help="Input SVG or raster image path")
     parser.add_argument(
         "--output",
         required=True,
-        help="Output .kicad_mod path",
+        help="Output .kicad_mod path, or an output directory when using --preset-sizes-in",
     )
     parser.add_argument(
         "--footprint-name",
@@ -45,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--layer",
         default="F.SilkS",
-        help="KiCad layer to force the artwork onto, for example F.Cu or F.SilkS",
+        help="KiCad layer to force artwork onto in single-layer mode",
     )
     parser.add_argument(
         "--width-mm",
@@ -58,10 +66,19 @@ def parse_args() -> argparse.Namespace:
         help="Target output height in millimeters",
     )
     parser.add_argument(
+        "--size-in",
+        type=float,
+        help="Target output width in inches",
+    )
+    parser.add_argument(
+        "--preset-sizes-in",
+        help="Comma-separated width presets in inches, for example 1,2,4",
+    )
+    parser.add_argument(
         "--threshold",
         type=int,
         default=180,
-        help="Threshold for raster inputs from 0 to 255. Darker pixels are kept by default.",
+        help="Threshold for single-layer raster inputs from 0 to 255. Darker pixels are kept by default.",
     )
     parser.add_argument(
         "--alpha-threshold",
@@ -72,7 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--invert",
         action="store_true",
-        help="Invert raster thresholding and keep lighter pixels instead.",
+        help="Invert single-layer raster thresholding and keep lighter pixels instead.",
     )
     parser.add_argument(
         "--max-dimension",
@@ -102,6 +119,38 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the generated svg2mod command before execution.",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["single", "dual-color"],
+        default="single",
+        help="Use single-layer conversion or split a two-color raster into one combined footprint",
+    )
+    parser.add_argument(
+        "--yellow-rgb",
+        default="247,147,26",
+        help="RGB triple for the copper art color in dual-color mode",
+    )
+    parser.add_argument(
+        "--white-rgb",
+        default="255,255,255",
+        help="RGB triple for the silkscreen art color in dual-color mode",
+    )
+    parser.add_argument(
+        "--color-tolerance",
+        type=int,
+        default=24,
+        help="Per-pixel RGB distance tolerance for dual-color matching",
+    )
+    parser.add_argument(
+        "--copper-layer",
+        default="F.Cu",
+        help="KiCad layer for the yellow art in dual-color mode",
+    )
+    parser.add_argument(
+        "--silkscreen-layer",
+        default="F.SilkS",
+        help="KiCad layer for the white art in dual-color mode",
+    )
     return parser.parse_args()
 
 
@@ -109,58 +158,302 @@ def main() -> None:
     args = parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
-    output_path = Path(args.output).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    footprint_name = args.footprint_name or output_path.stem
+    output_target = Path(args.output).expanduser().resolve()
 
     if not input_path.exists():
         raise SystemExit(f"Input file not found: {input_path}")
 
     threshold = validate_byte("threshold", args.threshold)
     alpha_threshold = validate_byte("alpha-threshold", args.alpha_threshold)
+    validate_byte("color-tolerance", args.color_tolerance)
 
-    with tempfile.TemporaryDirectory(prefix="kicad-art-") as tmpdir_name:
-        tmpdir = Path(tmpdir_name)
+    target_widths_mm = collect_target_widths_mm(args)
+    if not target_widths_mm:
+        target_widths_mm = [None]
 
-        if input_path.suffix.lower() in RASTER_SUFFIXES:
-            svg_input = tmpdir / f"{input_path.stem}.svg"
-            size = raster_to_svg(
-                input_path=input_path,
-                output_svg=svg_input,
-                threshold=threshold,
-                alpha_threshold=alpha_threshold,
-                invert=args.invert,
-                max_dimension=max(1, args.max_dimension),
-            )
-        else:
-            svg_input = input_path
-            size = load_svg_size(svg_input)
+    if args.preset_sizes_in:
+        output_target.mkdir(parents=True, exist_ok=True)
+    else:
+        output_target.parent.mkdir(parents=True, exist_ok=True)
 
-        scale_factor = compute_scale_factor(
-            size=size,
-            dpi=args.dpi,
-            width_mm=args.width_mm,
-            height_mm=args.height_mm,
-        )
+    for target_width_mm in target_widths_mm:
+        output_path = resolve_output_path(output_target, target_width_mm, args)
+        footprint_name = resolve_footprint_name(output_path, target_width_mm, args)
 
-        run_svg2mod(
-            svg_input=svg_input,
-            output_path=output_path,
-            footprint_name=footprint_name,
-            value=args.value,
-            layer=args.layer,
-            center=args.center,
-            precision=args.precision,
-            dpi=args.dpi,
-            scale_factor=scale_factor,
-            verbose=args.verbose,
-        )
+        with tempfile.TemporaryDirectory(prefix="kicad-art-") as tmpdir_name:
+            tmpdir = Path(tmpdir_name)
+
+            if args.mode == "dual-color":
+                if input_path.suffix.lower() not in RASTER_SUFFIXES:
+                    raise SystemExit("Dual-color mode currently expects a raster image input.")
+                generate_dual_color_module(
+                    input_path=input_path,
+                    output_path=output_path,
+                    footprint_name=footprint_name,
+                    value=args.value,
+                    target_width_mm=target_width_mm,
+                    height_mm=args.height_mm,
+                    args=args,
+                    tmpdir=tmpdir,
+                    alpha_threshold=alpha_threshold,
+                )
+            else:
+                generate_single_layer_module(
+                    input_path=input_path,
+                    output_path=output_path,
+                    footprint_name=footprint_name,
+                    value=args.value,
+                    target_width_mm=target_width_mm,
+                    height_mm=args.height_mm,
+                    layer=args.layer,
+                    precision=args.precision,
+                    dpi=args.dpi,
+                    center=args.center,
+                    threshold=threshold,
+                    alpha_threshold=alpha_threshold,
+                    invert=args.invert,
+                    max_dimension=max(1, args.max_dimension),
+                    verbose=args.verbose,
+                    tmpdir=tmpdir,
+                )
+
+
+def collect_target_widths_mm(args: argparse.Namespace) -> list[float | None]:
+    widths_mm: list[float | None] = []
+
+    if args.preset_sizes_in:
+        widths_mm.extend(value * 25.4 for value in parse_number_list(args.preset_sizes_in))
+    elif args.size_in is not None:
+        widths_mm.append(args.size_in * 25.4)
+    elif args.width_mm is not None:
+        widths_mm.append(args.width_mm)
+
+    return widths_mm
+
+
+def resolve_output_path(
+    output_target: Path,
+    target_width_mm: float | None,
+    args: argparse.Namespace,
+) -> Path:
+    if not args.preset_sizes_in:
+        return output_target
+
+    width_in = target_width_mm / 25.4 if target_width_mm is not None else 0.0
+    width_label = format_size_label(width_in)
+    base_name = args.footprint_name or Path(args.input).stem
+    return output_target / f"{base_name}_{width_label}.kicad_mod"
+
+
+def resolve_footprint_name(
+    output_path: Path,
+    target_width_mm: float | None,
+    args: argparse.Namespace,
+) -> str:
+    if not args.preset_sizes_in:
+        return args.footprint_name or output_path.stem
+
+    width_in = target_width_mm / 25.4 if target_width_mm is not None else 0.0
+    width_label = format_size_label(width_in)
+    base_name = args.footprint_name or Path(args.input).stem
+    return f"{base_name}_{width_label}"
+
+
+def format_size_label(size_in: float) -> str:
+    if math.isclose(size_in, round(size_in), abs_tol=1e-6):
+        return f"{int(round(size_in))}in"
+    return f"{size_in:.2f}in".replace(".", "p")
+
+
+def parse_number_list(value: str) -> list[float]:
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if not parts:
+        raise SystemExit("Expected at least one size value.")
+    return [float(part) for part in parts]
 
 
 def validate_byte(name: str, value: int) -> int:
     if not 0 <= value <= 255:
         raise SystemExit(f"{name} must be between 0 and 255")
     return value
+
+
+def generate_single_layer_module(
+    input_path: Path,
+    output_path: Path,
+    footprint_name: str,
+    value: str,
+    target_width_mm: float | None,
+    height_mm: float | None,
+    layer: str,
+    precision: float,
+    dpi: int,
+    center: bool,
+    threshold: int,
+    alpha_threshold: int,
+    invert: bool,
+    max_dimension: int,
+    verbose: bool,
+    tmpdir: Path,
+) -> None:
+    if input_path.suffix.lower() in RASTER_SUFFIXES:
+        svg_input = tmpdir / f"{input_path.stem}.svg"
+        size = raster_to_svg(
+            input_path=input_path,
+            output_svg=svg_input,
+            threshold=threshold,
+            alpha_threshold=alpha_threshold,
+            invert=invert,
+            max_dimension=max_dimension,
+        )
+    else:
+        svg_input = input_path
+        size = load_svg_size(svg_input)
+
+    scale_factor = compute_scale_factor(
+        size=size,
+        dpi=dpi,
+        width_mm=target_width_mm,
+        height_mm=height_mm,
+    )
+
+    run_svg2mod(
+        svg_input=svg_input,
+        output_path=output_path,
+        footprint_name=footprint_name,
+        value=value,
+        layer=layer,
+        center=center,
+        precision=precision,
+        dpi=dpi,
+        scale_factor=scale_factor,
+        verbose=verbose,
+    )
+
+    normalize_module_file(output_path, footprint_name, value)
+
+
+def generate_dual_color_module(
+    input_path: Path,
+    output_path: Path,
+    footprint_name: str,
+    value: str,
+    target_width_mm: float | None,
+    height_mm: float | None,
+    args: argparse.Namespace,
+    tmpdir: Path,
+    alpha_threshold: int,
+) -> None:
+    yellow_rgb = parse_rgb_triplet(args.yellow_rgb)
+    white_rgb = parse_rgb_triplet(args.white_rgb)
+    image, size = open_and_scale_image(input_path, max(1, args.max_dimension))
+
+    color_matches = [
+        ColorMatch("yellow", yellow_rgb, args.copper_layer),
+        ColorMatch("white", white_rgb, args.silkscreen_layer),
+    ]
+
+    module_sections: list[str] = []
+    for match in color_matches:
+        color_svg = tmpdir / f"{match.name}.svg"
+        rows = extract_color_rows(
+            image=image,
+            target_rgb=match.rgb,
+            tolerance=args.color_tolerance,
+            alpha_threshold=alpha_threshold,
+        )
+        rectangles = merge_row_runs(rows)
+        if not rectangles:
+            continue
+        write_svg_rects(color_svg, int(size.width_px), int(size.height_px), rectangles)
+
+        scale_factor = compute_scale_factor(
+            size=size,
+            dpi=args.dpi,
+            width_mm=target_width_mm,
+            height_mm=height_mm,
+        )
+        temp_module = tmpdir / f"{match.name}.kicad_mod"
+        run_svg2mod(
+            svg_input=color_svg,
+            output_path=temp_module,
+            footprint_name=footprint_name,
+            value=value,
+            layer=match.layer,
+            center=args.center,
+            precision=args.precision,
+            dpi=args.dpi,
+            scale_factor=scale_factor,
+            verbose=args.verbose,
+        )
+        module_sections.extend(extract_module_sections(temp_module))
+
+    if not module_sections:
+        raise SystemExit("No matching yellow or white pixels were found in the input image.")
+
+    write_combined_module(
+        output_path=output_path,
+        footprint_name=footprint_name,
+        value=value,
+        sections=module_sections,
+    )
+
+
+def parse_rgb_triplet(value: str) -> tuple[int, int, int]:
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 3:
+        raise SystemExit(f"RGB value must have exactly 3 comma-separated parts: {value}")
+    channels = tuple(validate_byte("rgb channel", int(part)) for part in parts)
+    return channels
+
+
+def open_and_scale_image(input_path: Path, max_dimension: int) -> tuple[Image.Image, ArtworkSize]:
+    image = Image.open(input_path).convert("RGBA")
+    width, height = image.size
+    longest_edge = max(width, height)
+    if longest_edge > max_dimension:
+        scale = max_dimension / float(longest_edge)
+        image = image.resize(
+            (
+                max(1, int(round(width * scale))),
+                max(1, int(round(height * scale))),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+        width, height = image.size
+    return image, ArtworkSize(width_px=float(width), height_px=float(height))
+
+
+def extract_color_rows(
+    image: Image.Image,
+    target_rgb: tuple[int, int, int],
+    tolerance: int,
+    alpha_threshold: int,
+) -> list[list[tuple[int, int]]]:
+    pixels = image.load()
+    width, height = image.size
+    rows: list[list[tuple[int, int]]] = []
+
+    for y in range(height):
+        runs: list[tuple[int, int]] = []
+        run_start: int | None = None
+        for x in range(width):
+            red, green, blue, alpha = pixels[x, y]
+            channel_delta = max(
+                abs(red - target_rgb[0]),
+                abs(green - target_rgb[1]),
+                abs(blue - target_rgb[2]),
+            )
+            filled = alpha >= alpha_threshold and channel_delta <= tolerance
+            if filled and run_start is None:
+                run_start = x
+            elif not filled and run_start is not None:
+                runs.append((run_start, x))
+                run_start = None
+        if run_start is not None:
+            runs.append((run_start, width))
+        rows.append(runs)
+    return rows
 
 
 def raster_to_svg(
@@ -171,20 +464,10 @@ def raster_to_svg(
     invert: bool,
     max_dimension: int,
 ) -> ArtworkSize:
-    image = Image.open(input_path).convert("RGBA")
-
-    width, height = image.size
-    longest_edge = max(width, height)
-    if longest_edge > max_dimension:
-        scale = max_dimension / float(longest_edge)
-        new_size = (
-            max(1, int(round(width * scale))),
-            max(1, int(round(height * scale))),
-        )
-        image = image.resize(new_size, Image.Resampling.LANCZOS)
-        width, height = image.size
+    image, size = open_and_scale_image(input_path, max_dimension)
 
     pixels = image.load()
+    width, height = image.size
     rows: list[list[tuple[int, int]]] = []
 
     for y in range(height):
@@ -209,6 +492,16 @@ def raster_to_svg(
     if not rectangles:
         raise SystemExit("No visible art remained after raster thresholding.")
 
+    write_svg_rects(output_svg, width, height, rectangles)
+    return size
+
+
+def write_svg_rects(
+    output_svg: Path,
+    width: int,
+    height: int,
+    rectangles: list[tuple[int, int, int, int]],
+) -> None:
     svg_lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '  <g fill="#000000" stroke="none">',
@@ -219,8 +512,6 @@ def raster_to_svg(
         )
     svg_lines.extend(["  </g>", "</svg>"])
     output_svg.write_text("\n".join(svg_lines) + "\n", encoding="utf-8")
-
-    return ArtworkSize(width_px=float(width), height_px=float(height))
 
 
 def merge_row_runs(rows: Iterable[list[tuple[int, int]]]) -> list[tuple[int, int, int, int]]:
@@ -311,7 +602,7 @@ def run_svg2mod(
     layer: str,
     center: bool,
     precision: float,
-    dpi: float,
+    dpi: int,
     scale_factor: float,
     verbose: bool,
 ) -> None:
@@ -332,7 +623,7 @@ def run_svg2mod(
         "--force-layer",
         layer,
         "--dpi",
-        str(int(dpi)),
+        str(dpi),
         "--factor",
         str(scale_factor),
         "--precision",
@@ -346,6 +637,92 @@ def run_svg2mod(
         print("Running:", " ".join(command))
 
     subprocess.run(command, check=True)
+
+
+def normalize_module_file(output_path: Path, footprint_name: str, value: str) -> None:
+    sections = extract_module_sections(output_path)
+    write_combined_module(output_path, footprint_name, value, sections)
+
+
+def extract_module_sections(module_path: Path) -> list[str]:
+    text = module_path.read_text(encoding="utf-8")
+    sections: list[str] = []
+    for token in ("(fp_poly", "(pad "):
+        start_index = 0
+        while True:
+            index = text.find(token, start_index)
+            if index == -1:
+                break
+            sections.append(extract_balanced_block(text, index))
+            start_index = index + 1
+    return sections
+
+
+def extract_balanced_block(text: str, start_index: int) -> str:
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index in range(start_index, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start_index : index + 1]
+
+    raise SystemExit("Failed to parse generated KiCad module content.")
+
+
+def write_combined_module(
+    output_path: Path,
+    footprint_name: str,
+    value: str,
+    sections: list[str],
+) -> None:
+    normalized_sections = [indent_kicad_block(section, 2) for section in sections]
+    module_text = "\n".join(
+        [
+            f'(module {footprint_name} (layer F.Cu) (tedit {format_tedit()})',
+            "  (attr board_only exclude_from_pos_files exclude_from_bom)",
+            f'  (descr "Generated by kicad_art_generator as reusable board art")',
+            "  (tags kicad_art_generator)",
+            f"  {make_fp_text('reference', footprint_name, -2.0)}",
+            f"  {make_fp_text('value', value, 2.0)}",
+            *normalized_sections,
+            ")",
+            "",
+        ]
+    )
+    output_path.write_text(module_text, encoding="utf-8")
+
+
+def format_tedit() -> str:
+    return uuid.uuid4().hex[:8].upper()
+
+
+def make_fp_text(kind: str, text: str, y_pos: float) -> str:
+    return (
+        f"(fp_text {kind} {text} (at 0 {y_pos}) (layer F.SilkS) hide "
+        f"(effects (font (size 1.524 1.524) (thickness 0.3048))))"
+    )
+
+
+def indent_kicad_block(block: str, spaces: int) -> str:
+    indent = " " * spaces
+    return "\n".join(f"{indent}{line}" if line else line for line in block.splitlines())
 
 
 if __name__ == "__main__":

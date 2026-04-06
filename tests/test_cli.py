@@ -34,18 +34,19 @@ def test_svg_example_generates_kicad_module(tmp_path: Path) -> None:
 
     text = output.read_text(encoding="utf-8")
     assert "(module bitcoin_b" in text
+    assert "(attr board_only exclude_from_pos_files exclude_from_bom)" in text
     assert "(layer F.Cu)" in text
     assert "(fp_poly" in text
 
 
-def test_raster_input_generates_kicad_module(tmp_path: Path) -> None:
+def test_dual_color_generates_combined_layers_and_presets(tmp_path: Path) -> None:
     image_path = tmp_path / "test.png"
-    output = tmp_path / "test_logo.kicad_mod"
+    output_dir = tmp_path / "out"
 
-    image = Image.new("RGBA", (32, 32), (255, 255, 255, 0))
+    image = Image.new("RGBA", (32, 24), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    draw.rectangle((4, 4, 27, 27), fill=(0, 0, 0, 255))
-    draw.rectangle((11, 11, 20, 20), fill=(255, 255, 255, 0))
+    draw.rectangle((2, 2, 13, 21), fill=(247, 147, 26, 255))
+    draw.rectangle((16, 2, 29, 21), fill=(255, 255, 255, 255))
     image.save(image_path)
 
     subprocess.run(
@@ -54,18 +55,30 @@ def test_raster_input_generates_kicad_module(tmp_path: Path) -> None:
             "-m",
             "kicad_art_generator.cli",
             str(image_path),
+            "--mode",
+            "dual-color",
             "--output",
-            str(output),
-            "--layer",
-            "F.SilkS",
-            "--width-mm",
-            "10",
+            str(output_dir),
+            "--preset-sizes-in",
+            "1,2,4",
+            "--footprint-name",
+            "badge_art",
+            "--center",
         ],
         check=True,
         cwd=REPO_ROOT,
     )
 
-    text = output.read_text(encoding="utf-8")
-    assert "(module test_logo" in text
+    generated = sorted(path.name for path in output_dir.glob("*.kicad_mod"))
+    assert generated == [
+        "badge_art_1in.kicad_mod",
+        "badge_art_2in.kicad_mod",
+        "badge_art_4in.kicad_mod",
+    ]
+
+    text = (output_dir / "badge_art_2in.kicad_mod").read_text(encoding="utf-8")
+    assert "(module badge_art_2in" in text
+    assert "(attr board_only exclude_from_pos_files exclude_from_bom)" in text
+    assert text.count("(fp_poly") >= 2
+    assert "(layer F.Cu)" in text
     assert "(layer F.SilkS)" in text
-    assert "(fp_poly" in text
