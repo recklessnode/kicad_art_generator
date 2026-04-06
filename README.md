@@ -134,6 +134,19 @@ kicad-art cholla_cactus.png \
   --preview-output output/cholla_cactus_silks_preview.png
 ```
 
+Export directly into a KiCad footprint library:
+
+```bash
+. .venv/bin/activate
+kicad-art cholla_cactus.png \
+  --output output/cholla_cactus_silks.kicad_mod \
+  --layer F.SilkS \
+  --width-mm 50 \
+  --foreground-rgb 0,0,0 \
+  --background-rgb 255,255,255 \
+  --pretty-dir ./ArtAssets.pretty
+```
+
 ## What the tool does
 
 - Uses `svg2mod` for KiCad module generation
@@ -186,6 +199,7 @@ Main options:
 - `--foreground-rgb`: retain this color in single-layer raster mode
 - `--background-rgb`: explicitly ignore this color in single-layer raster mode
 - `--preview-output`: write a PNG preview of the retained artwork in the chosen layer color
+- `--pretty-dir`: copy generated `.kicad_mod` files directly into a target `.pretty` library directory
 
 Run `kicad-art --help` to see the full current option set.
 
@@ -204,7 +218,7 @@ Run `kicad-art --help` to see the full current option set.
 
 1. Prepare a clean two-color source image in GIMP or Inkscape, using one yellow tone and one white tone with transparency elsewhere.
 2. Run `kicad-art` in `dual-color` mode with either `--preset-sizes-in 1,2,4` or your own `--sizes-in` / `--sizes-mm` list.
-3. Copy the generated `.kicad_mod` files into a `.pretty` library in your KiCad project or shared asset repo.
+3. Either copy the generated `.kicad_mod` files into a `.pretty` library, or pass `--pretty-dir` so the tool exports them there automatically.
 4. Place the resulting art footprint like any other footprint in PCB Editor.
 
 The copper and silkscreen geometry is embedded into the footprint itself, which keeps the art durable and reusable across board designs.

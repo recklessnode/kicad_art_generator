@@ -11,3 +11,4 @@
 - Extended sizing so output generation is explicitly parametric for custom batch sizes in either inches or millimeters, not just the default preset-size workflow.
 - Added named art presets for silkscreen, exposed copper, covered copper, and exposed substrate tones, including mask-opening behavior where needed.
 - Added dual-color preview generation and validated the `Cholla Energy.png` logo as exposed ENIG-style yellow copper plus green silkscreen.
+- Added direct `.pretty` export support so generated footprints can be written straight into a KiCad footprint library.

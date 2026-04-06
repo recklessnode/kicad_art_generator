@@ -168,3 +168,41 @@ def test_single_layer_copper_exposed_preset_adds_mask(tmp_path: Path) -> None:
     text = output.read_text(encoding="utf-8")
     assert "(layer F.Cu)" in text
     assert "(layer F.Mask)" in text
+
+
+def test_export_to_pretty_dir(tmp_path: Path) -> None:
+    image_path = tmp_path / "logo.png"
+    output = tmp_path / "logo.kicad_mod"
+    pretty_dir = tmp_path / "ArtAssets.pretty"
+
+    image = Image.new("RGBA", (18, 18), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((4, 4, 13, 13), fill=(0, 0, 0, 255))
+    image.save(image_path)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--output",
+            str(output),
+            "--layer",
+            "F.SilkS",
+            "--width-mm",
+            "8",
+            "--foreground-rgb",
+            "0,0,0",
+            "--background-rgb",
+            "255,255,255",
+            "--pretty-dir",
+            str(pretty_dir),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    exported = pretty_dir / "logo.kicad_mod"
+    assert exported.exists()
+    assert "(module logo" in exported.read_text(encoding="utf-8")

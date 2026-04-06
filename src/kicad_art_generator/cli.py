@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import math
 import subprocess
 import sys
@@ -217,6 +218,10 @@ def parse_args() -> argparse.Namespace:
         "--preview-output",
         help="Optional PNG preview showing the selected art using the target layer color on a green board background",
     )
+    parser.add_argument(
+        "--pretty-dir",
+        help="Optional target .pretty directory to receive the generated .kicad_mod files",
+    )
     return parser.parse_args()
 
 
@@ -235,8 +240,11 @@ def main() -> None:
     preview_output = (
         Path(args.preview_output).expanduser().resolve() if args.preview_output else None
     )
+    pretty_dir = Path(args.pretty_dir).expanduser().resolve() if args.pretty_dir else None
     if preview_output is not None:
         preview_output.parent.mkdir(parents=True, exist_ok=True)
+    if pretty_dir is not None:
+        ensure_pretty_dir(pretty_dir)
 
     target_widths_mm = collect_target_widths_mm(args)
     if not target_widths_mm:
@@ -296,6 +304,9 @@ def main() -> None:
                         preview_output, output_path, target_width_mm, args
                     ),
                 )
+
+        if pretty_dir is not None:
+            export_to_pretty_dir(output_path, pretty_dir)
 
 
 def collect_target_widths_mm(args: argparse.Namespace) -> list[float | None]:
@@ -401,6 +412,18 @@ def parse_number_list(value: str) -> list[float]:
     if not parts:
         raise SystemExit("Expected at least one size value.")
     return [float(part) for part in parts]
+
+
+def ensure_pretty_dir(pretty_dir: Path) -> None:
+    if pretty_dir.suffix != ".pretty":
+        raise SystemExit(f"--pretty-dir must point to a .pretty directory: {pretty_dir}")
+    pretty_dir.mkdir(parents=True, exist_ok=True)
+
+
+def export_to_pretty_dir(output_path: Path, pretty_dir: Path) -> Path:
+    destination = pretty_dir / output_path.name
+    shutil.copy2(output_path, destination)
+    return destination
 
 
 def validate_byte(name: str, value: int) -> int:
