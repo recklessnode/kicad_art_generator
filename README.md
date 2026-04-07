@@ -213,6 +213,21 @@ kicad-art "RecklessSystemsLogoWhiteColor.svg" \
   --center
 ```
 
+If the result looks too grainy, increase detail retention:
+
+```bash
+. .venv/bin/activate
+kicad-art "RecklessSystemsLogoWhiteColor.svg" \
+  --mode multi-color \
+  --output output/reckless_svg_multicolor_hq.kicad_mod \
+  --footprint-name reckless_svg_multicolor_hq \
+  --width-mm 60 \
+  --multi-color-presets silkscreen,copper-exposed,copper-covered,substrate-exposed \
+  --preview-output output/reckless_svg_multicolor_hq_preview.png \
+  --quality high \
+  --center
+```
+
 ## What the tool does
 
 - Uses `svg2mod` for KiCad module generation
@@ -225,6 +240,7 @@ kicad-art "RecklessSystemsLogoWhiteColor.svg" \
 - Supports named art presets that emit the PCB layers needed for visible art finishes
 - Can analyze an image palette and suggest likely single-layer or dual-color mappings
 - Can perform best-effort multi-color mapping, including on SVG input by rasterizing it for palette analysis
+- Supports quality presets so you can trade output sharpness against footprint size and generation cost
 - Lets you target a specific KiCad layer such as `F.Cu`, `B.Cu`, `F.SilkS`, or `B.Mask`
 - Lets you size the output by width or height in millimeters
 - Supports preset width generation in inches for reusable art families
@@ -259,6 +275,7 @@ Main options:
 - `--invert`: invert raster thresholding
 - `--center`: center the footprint around its bounding box
 - `--precision`: line approximation precision passed through to `svg2mod`
+- `--quality`: detail preset for working resolution and curve sharpness
 - `--yellow-rgb`: RGB triple for copper art in dual-color mode
 - `--white-rgb`: RGB triple for silkscreen art in dual-color mode
 - `--color-tolerance`: matching tolerance for the dual-color split
@@ -315,6 +332,21 @@ This is intentionally best-effort:
 - it works well when the SVG has a small number of strong visible color families
 - tiny anti-alias colors are usually ignored or absorbed
 - if the palette is too fragmented, use `--mode analyze` first and then tune the presets or explicit RGB options
+
+## Quality Presets
+
+- `draft`: smallest and fastest, but the most blocky
+- `standard`: balanced default
+- `high`: better detail retention for logos and denser artwork
+- `ultra`: maximum fidelity, but can produce very large footprints
+
+The quality preset adjusts:
+
+- raster working resolution
+- SVG render width for color-family extraction
+- curve approximation precision
+
+You can still override `--max-dimension`, `--svg-render-width`, or `--precision` directly when needed.
 
 ## Named Art Presets
 

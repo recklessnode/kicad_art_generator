@@ -23,6 +23,12 @@ PREVIEW_WHITE = (245, 245, 245, 255)
 PREVIEW_GOLD = (230, 183, 45, 255)
 PREVIEW_DARK_GREEN = (15, 72, 43, 255)
 PREVIEW_BROWN = (139, 103, 63, 255)
+QUALITY_DEFAULTS = {
+    "draft": {"max_dimension": 512, "svg_render_width": 1024, "precision": 5.0},
+    "standard": {"max_dimension": 1024, "svg_render_width": 2048, "precision": 3.0},
+    "high": {"max_dimension": 2048, "svg_render_width": 4096, "precision": 1.5},
+    "ultra": {"max_dimension": 4096, "svg_render_width": 8192, "precision": 1.0},
+}
 
 
 @dataclass
@@ -89,6 +95,7 @@ HELP_EXAMPLES = """Examples:
       --adjacent-shade-limit 16 \\
       --alpha-threshold 32 \\
       --preview-output output/cholla_energy_enig_v2_preview.png \\
+      --quality high \\
       --center
 
   Export directly into a KiCad library bundle:
@@ -100,6 +107,17 @@ HELP_EXAMPLES = """Examples:
       --background-rgb 255,255,255 \\
       --library-root ./libraries \\
       --library-name PromoArt
+
+  Push SVG detail higher when needed:
+    kicad-art "RecklessSystemsLogoWhiteColor.svg" \\
+      --mode multi-color \\
+      --output output/reckless_svg_multicolor_hq.kicad_mod \\
+      --footprint-name reckless_svg_multicolor_hq \\
+      --width-mm 60 \\
+      --multi-color-presets silkscreen,copper-exposed,copper-covered,substrate-exposed \\
+      --preview-output output/reckless_svg_multicolor_hq_preview.png \\
+      --quality high \\
+      --center
 """
 
 
@@ -161,6 +179,12 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated custom output widths in millimeters, for example 12.5,25,37.5",
     )
     parser.add_argument(
+        "--quality",
+        choices=list(QUALITY_DEFAULTS),
+        default="standard",
+        help="Detail preset that tunes working resolution and curve sharpness",
+    )
+    parser.add_argument(
         "--threshold",
         type=int,
         default=180,
@@ -180,7 +204,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-dimension",
         type=int,
-        default=512,
         help="Maximum raster dimension before downscaling for footprint generation.",
     )
     parser.add_argument(
@@ -191,7 +214,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--precision",
         type=float,
-        default=5.0,
         help="Curve approximation precision passed to svg2mod.",
     )
     parser.add_argument(
@@ -309,7 +331,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--svg-render-width",
         type=int,
-        default=1024,
         help="Raster render width used when color-analyzing SVG artwork",
     )
     return parser.parse_args()
@@ -317,6 +338,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    apply_quality_defaults(args)
 
     input_path = Path(args.input).expanduser().resolve()
 
@@ -502,6 +524,16 @@ def resolve_dual_art_preset(preset_name: str | None, fallback_layer: str) -> Art
     if preset_name:
         return get_art_preset(preset_name)
     return ArtPreset(fallback_layer, (fallback_layer,), preview_color_for_layer(fallback_layer))
+
+
+def apply_quality_defaults(args: argparse.Namespace) -> None:
+    quality = QUALITY_DEFAULTS[args.quality]
+    if args.max_dimension is None:
+        args.max_dimension = quality["max_dimension"]
+    if args.svg_render_width is None:
+        args.svg_render_width = quality["svg_render_width"]
+    if args.precision is None:
+        args.precision = quality["precision"]
 
 
 def preview_color_for_layer(layer: str) -> tuple[int, int, int, int]:
