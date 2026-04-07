@@ -355,6 +355,49 @@ def test_multi_color_svg_best_effort_mapping(tmp_path: Path) -> None:
     assert preview.exists()
 
 
+def test_multi_color_svg_preserves_close_declared_colors(tmp_path: Path) -> None:
+    svg_path = tmp_path / "close_colors.svg"
+    output = tmp_path / "close_colors.kicad_mod"
+
+    svg_path.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" width="200" height="80" viewBox="0 0 200 80">
+  <rect x="0" y="0" width="45" height="80" style="fill:rgb(255,255,255);" />
+  <rect x="50" y="0" width="45" height="80" style="fill:rgb(240,81,54);" />
+  <rect x="100" y="0" width="45" height="80" style="fill:rgb(1,190,219);" />
+  <rect x="150" y="0" width="45" height="80" style="fill:rgb(20,191,219);" />
+</svg>
+""",
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(svg_path),
+            "--mode",
+            "multi-color",
+            "--output",
+            str(output),
+            "--width-mm",
+            "30",
+            "--multi-color-presets",
+            "silkscreen,copper-exposed,copper-covered,user-drawings",
+            "--svg-render-width",
+            "1024",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "(layer F.SilkS)" in text
+    assert "(layer F.Cu)" in text
+    assert "(layer F.Mask)" in text
+    assert "(layer Dwgs.User)" in text
+
+
 def test_analyze_mode_suggests_dual_color_mapping(tmp_path: Path) -> None:
     image_path = tmp_path / "analyze_dual.png"
 

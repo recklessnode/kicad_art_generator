@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import math
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,7 @@ PREVIEW_WHITE = (245, 245, 245, 255)
 PREVIEW_GOLD = (230, 183, 45, 255)
 PREVIEW_DARK_GREEN = (15, 72, 43, 255)
 PREVIEW_BROWN = (139, 103, 63, 255)
+PREVIEW_USER = (130, 180, 220, 255)
 QUALITY_DEFAULTS = {
     "draft": {"max_dimension": 512, "svg_render_width": 1024, "precision": 5.0},
     "standard": {"max_dimension": 1024, "svg_render_width": 2048, "precision": 3.0},
@@ -73,6 +75,7 @@ ART_PRESETS = {
     "back-copper-covered": ArtPreset("back-copper-covered", ("B.Cu",), (12, 60, 38, 255)),
     "substrate-exposed": ArtPreset("substrate-exposed", ("F.Mask",), PREVIEW_BROWN),
     "back-substrate-exposed": ArtPreset("back-substrate-exposed", ("B.Mask",), (120, 88, 54, 255)),
+    "user-drawings": ArtPreset("user-drawings", ("Dwgs.User",), PREVIEW_USER),
 }
 
 
@@ -543,6 +546,8 @@ def preview_color_for_layer(layer: str) -> tuple[int, int, int, int]:
         return PREVIEW_DARK_GREEN
     if layer in ("F.Mask", "B.Mask"):
         return PREVIEW_BROWN
+    if layer == "Dwgs.User":
+        return PREVIEW_USER
     return PREVIEW_WHITE
 
 
@@ -1009,24 +1014,39 @@ def generate_multi_color_module(
         raise SystemExit("--multi-color-presets must contain at least one preset name.")
     presets = [get_art_preset(name) for name in preset_names[: max(1, args.max_color_count)]]
 
-    chosen_clusters = choose_multi_color_clusters(
-        image=image,
-        alpha_threshold=alpha_threshold,
-        cluster_tolerance=args.analysis_cluster_tolerance,
-        min_fraction=args.analysis_min_fraction,
-        max_color_count=min(args.max_color_count, len(presets)),
-    )
-    if not chosen_clusters:
+    svg_seed_masks: dict[tuple[int, int, int], RasterSelection] = {}
+    if input_path.suffix.lower() == ".svg":
+        svg_seed_masks = render_svg_seed_masks(
+            input_path=input_path,
+            tmpdir=tmpdir,
+            svg_render_width=args.svg_render_width,
+            alpha_threshold=alpha_threshold,
+            max_dimension=max(1, args.max_dimension),
+        )
+        seed_colors = list(svg_seed_masks)[: min(args.max_color_count, len(presets))]
+    else:
+        seed_colors = choose_multi_color_seed_colors(
+            input_path=input_path,
+            image=image,
+            alpha_threshold=alpha_threshold,
+            cluster_tolerance=args.analysis_cluster_tolerance,
+            min_fraction=args.analysis_min_fraction,
+            max_color_count=min(args.max_color_count, len(presets)),
+        )
+    if not seed_colors:
         raise SystemExit("Could not find enough dominant visible colors for multi-color mapping.")
 
-    palette_sets = select_palette_sets_for_seeds(
-        image=image,
-        seeds=[cluster.rgb for cluster in chosen_clusters],
-        alpha_threshold=alpha_threshold,
-        base_tolerance=args.color_tolerance,
-        adjacent_tolerance=args.adjacent_color_tolerance,
-        adjacent_shade_limit=args.adjacent_shade_limit,
-    )
+    if input_path.suffix.lower() == ".svg":
+        pass
+    else:
+        palette_sets = select_palette_sets_for_seeds(
+            image=image,
+            seeds=seed_colors,
+            alpha_threshold=alpha_threshold,
+            base_tolerance=args.color_tolerance,
+            adjacent_tolerance=args.adjacent_color_tolerance,
+            adjacent_shade_limit=args.adjacent_shade_limit,
+        )
 
     module_sections: list[str] = []
     preview_layers: list[tuple[list[list[tuple[int, int]]], tuple[int, int, int, int]]] = []
@@ -1037,20 +1057,28 @@ def generate_multi_color_module(
         height_mm=height_mm,
     )
 
-    for index, cluster in enumerate(chosen_clusters):
+    for index, seed_rgb in enumerate(seed_colors):
         preset = presets[index]
-        rows = extract_color_rows(
-            image=image,
-            target_rgb=cluster.rgb,
-            tolerance=args.color_tolerance,
-            alpha_threshold=alpha_threshold,
-            accepted_colors=palette_sets.get(cluster.rgb),
-        )
+        if input_path.suffix.lower() == ".svg":
+            selection = svg_seed_masks[seed_rgb]
+            rows = selection.rows
+            rect_width = selection.width
+            rect_height = selection.height
+        else:
+            rows = extract_color_rows(
+                image=image,
+                target_rgb=seed_rgb,
+                tolerance=args.color_tolerance,
+                alpha_threshold=alpha_threshold,
+                accepted_colors=palette_sets.get(seed_rgb),
+            )
+            rect_width = int(size.width_px)
+            rect_height = int(size.height_px)
         rectangles = merge_row_runs(rows)
         if not rectangles:
             continue
         svg_path = tmpdir / f"multi_{index}.svg"
-        write_svg_rects(svg_path, int(size.width_px), int(size.height_px), rectangles)
+        write_svg_rects(svg_path, rect_width, rect_height, rectangles)
         preview_layers.append((rows, preset.preview_color))
 
         for layer in preset.layers:
@@ -1140,6 +1168,89 @@ def render_svg_to_png(input_path: Path, output_path: Path, render_width: int) ->
     subprocess.run(command, check=True)
 
 
+def render_svg_seed_masks(
+    input_path: Path,
+    tmpdir: Path,
+    svg_render_width: int,
+    alpha_threshold: int,
+    max_dimension: int,
+) -> dict[tuple[int, int, int], RasterSelection]:
+    rendered: list[tuple[tuple[int, int, int], RasterSelection, int]] = []
+    for index, seed_rgb in enumerate(parse_svg_declared_colors(input_path)):
+        mask_svg = tmpdir / f"multi_mask_{index}.svg"
+        mask_png = tmpdir / f"multi_mask_{index}.png"
+        write_svg_color_mask(input_path, seed_rgb, mask_svg)
+        render_svg_to_png(mask_svg, mask_png, svg_render_width)
+        selection = raster_to_selection(
+            input_path=mask_png,
+            threshold=200,
+            alpha_threshold=alpha_threshold,
+            invert=False,
+            max_dimension=max_dimension,
+            foreground_rgb=(0, 0, 0),
+            background_rgb=(255, 255, 255),
+            color_tolerance=24,
+        )
+        coverage = sum(x1 - x0 for runs in selection.rows for x0, x1 in runs)
+        if coverage > 0:
+            rendered.append((seed_rgb, selection, coverage))
+    rendered.sort(key=lambda item: item[2], reverse=True)
+    return {seed_rgb: selection for seed_rgb, selection, _coverage in rendered}
+
+
+def parse_svg_declared_colors(input_path: Path) -> list[tuple[int, int, int]]:
+    text = input_path.read_text(encoding="utf-8")
+    matches = re.findall(r"(?i)(?:fill|stroke)\s*:\s*rgb\((\d+),(\d+),(\d+)\)|(?:fill|stroke)\s*=\s*\"#([0-9a-f]{6})\"", text)
+    colors: list[tuple[int, int, int]] = []
+    for r1, g1, b1, hex_value in matches:
+        if hex_value:
+            colors.append(tuple(int(hex_value[i : i + 2], 16) for i in (0, 2, 4)))
+        else:
+            colors.append((int(r1), int(g1), int(b1)))
+    seen: set[tuple[int, int, int]] = set()
+    ordered: list[tuple[int, int, int]] = []
+    for color in colors:
+        if color not in seen:
+            seen.add(color)
+            ordered.append(color)
+    return ordered
+
+
+def write_svg_color_mask(input_path: Path, target_rgb: tuple[int, int, int], output_path: Path) -> None:
+    text = input_path.read_text(encoding="utf-8")
+    target = f"rgb({target_rgb[0]},{target_rgb[1]},{target_rgb[2]})"
+    target_hex = "#{:02x}{:02x}{:02x}".format(*target_rgb)
+
+    def replace_style(match: re.Match[str]) -> str:
+        prop = match.group(1)
+        value = match.group(2)
+        normalized = value.replace(" ", "").lower()
+        if normalized in {target.lower(), target_hex.lower()}:
+            return f"{prop}:rgb(0,0,0)"
+        return f"{prop}:none"
+
+    text = re.sub(
+        r"(fill|stroke)\s*:\s*(rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)|#[0-9A-Fa-f]{6})",
+        replace_style,
+        text,
+    )
+
+    def replace_attr(match: re.Match[str]) -> str:
+        prop = match.group(1)
+        value = match.group(2)
+        normalized = value.replace(" ", "").lower()
+        if normalized in {target.lower(), target_hex.lower()}:
+            return f'{prop}="rgb(0,0,0)"'
+        return f'{prop}="none"'
+
+    text = re.sub(
+        r'(fill|stroke)\s*=\s*"(rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)|#[0-9A-Fa-f]{6})"',
+        replace_attr,
+        text,
+    )
+    output_path.write_text(text, encoding="utf-8")
+
+
 def select_dual_color_palette_sets(
     image: Image.Image,
     matches: list[ColorMatch],
@@ -1198,6 +1309,61 @@ def select_palette_sets_for_seeds(
             extra_counts[nearest_seed] += 1
 
     return accepted
+
+
+def assign_pixels_to_svg_seed_colors(
+    image: Image.Image,
+    seeds: list[tuple[int, int, int]],
+    alpha_threshold: int,
+) -> dict[tuple[int, int, int], set[tuple[int, int, int]]]:
+    palette = Counter(
+        (red, green, blue)
+        for red, green, blue, alpha in image.getdata()
+        if alpha >= alpha_threshold
+    )
+    assignments: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {seed: set() for seed in seeds}
+    for rgb, _count in palette.items():
+        nearest_seed = min(seeds, key=lambda seed: color_distance_max(rgb, seed))
+        assignments[nearest_seed].add(rgb)
+    return assignments
+
+
+def choose_multi_color_seed_colors(
+    input_path: Path,
+    image: Image.Image,
+    alpha_threshold: int,
+    cluster_tolerance: int,
+    min_fraction: float,
+    max_color_count: int,
+) -> list[tuple[int, int, int]]:
+    if input_path.suffix.lower() == ".svg":
+        declared = parse_svg_declared_colors(input_path)
+        if declared:
+            return rank_seed_colors_by_coverage(image, declared, alpha_threshold)[:max_color_count]
+
+    clusters = choose_multi_color_clusters(
+        image=image,
+        alpha_threshold=alpha_threshold,
+        cluster_tolerance=cluster_tolerance,
+        min_fraction=min_fraction,
+        max_color_count=max_color_count,
+    )
+    return [cluster.rgb for cluster in clusters]
+
+
+def rank_seed_colors_by_coverage(
+    image: Image.Image,
+    seeds: list[tuple[int, int, int]],
+    alpha_threshold: int,
+) -> list[tuple[int, int, int]]:
+    coverage = {seed: 0 for seed in seeds}
+    for red, green, blue, alpha in image.getdata():
+        if alpha < alpha_threshold:
+            continue
+        rgb = (red, green, blue)
+        nearest_seed = min(seeds, key=lambda seed: color_distance_max(rgb, seed))
+        coverage[nearest_seed] += 1
+    return [seed for seed, _count in sorted(coverage.items(), key=lambda item: item[1], reverse=True) if _count > 0]
 
 
 def choose_multi_color_clusters(

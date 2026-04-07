@@ -330,6 +330,7 @@ For multi-color SVG assets, the tool rasterizes the SVG for color-family analysi
 This is intentionally best-effort:
 
 - it works well when the SVG has a small number of strong visible color families
+- it now prefers declared SVG source colors as separate families before falling back to rendered palette clustering
 - tiny anti-alias colors are usually ignored or absorbed
 - if the palette is too fragmented, use `--mode analyze` first and then tune the presets or explicit RGB options
 
