@@ -447,6 +447,7 @@ def main() -> None:
                     alpha_threshold=alpha_threshold,
                     invert=args.invert,
                     max_dimension=max(1, args.max_dimension),
+                    svg_render_width=args.svg_render_width,
                     verbose=args.verbose,
                     tmpdir=tmpdir,
                     foreground_rgb=parse_optional_rgb_triplet(args.foreground_rgb),
@@ -834,6 +835,7 @@ def generate_single_layer_module(
     alpha_threshold: int,
     invert: bool,
     max_dimension: int,
+    svg_render_width: int,
     verbose: bool,
     tmpdir: Path,
     foreground_rgb: tuple[int, int, int] | None,
@@ -869,6 +871,26 @@ def generate_single_layer_module(
     else:
         svg_input = input_path
         size = load_svg_size(svg_input)
+        if preview_output is not None:
+            preview_selection = preview_selection_from_svg(
+                input_path=input_path,
+                tmpdir=tmpdir,
+                alpha_threshold=alpha_threshold,
+                max_dimension=max_dimension,
+                svg_render_width=svg_render_width,
+                threshold=threshold,
+                invert=invert,
+                foreground_rgb=foreground_rgb,
+                background_rgb=background_rgb,
+                color_tolerance=color_tolerance,
+            )
+            write_preview_png(
+                rows=preview_selection.rows,
+                width=preview_selection.width,
+                height=preview_selection.height,
+                color=preset.preview_color,
+                output_path=preview_output,
+            )
 
     scale_factor = compute_scale_factor(
         size=size,
@@ -1153,6 +1175,32 @@ def load_work_image(
         render_svg_to_png(input_path, raster_path, svg_render_width)
         return open_and_scale_image(raster_path, max_dimension)
     raise SystemExit(f"Unsupported input type for image-based processing: {input_path.suffix}")
+
+
+def preview_selection_from_svg(
+    input_path: Path,
+    tmpdir: Path,
+    alpha_threshold: int,
+    max_dimension: int,
+    svg_render_width: int,
+    threshold: int,
+    invert: bool,
+    foreground_rgb: tuple[int, int, int] | None,
+    background_rgb: tuple[int, int, int] | None,
+    color_tolerance: int,
+) -> RasterSelection:
+    raster_path = tmpdir / f"{input_path.stem}_preview.png"
+    render_svg_to_png(input_path, raster_path, svg_render_width)
+    return raster_to_selection(
+        input_path=raster_path,
+        threshold=threshold,
+        alpha_threshold=alpha_threshold,
+        invert=invert,
+        max_dimension=max_dimension,
+        foreground_rgb=foreground_rgb,
+        background_rgb=background_rgb,
+        color_tolerance=color_tolerance,
+    )
 
 
 def render_svg_to_png(input_path: Path, output_path: Path, render_width: int) -> None:

@@ -236,7 +236,7 @@ kicad-art "RecklessSystemsLogoWhiteColor.svg" \
 - Supports two-color PNG-style assets with yellow sent to `F.Cu` and white sent to `F.SilkS`
 - Emits a single combined footprint so the art stays together as one reusable module
 - Supports single-layer raster extraction by retaining a chosen foreground color and explicitly ignoring a background color
-- Can generate a preview PNG on a green board-like background using the target layer color
+- Can generate a preview PNG on a green board-like background for single-color and multi-color SVG and PNG workflows
 - Supports named art presets that emit the PCB layers needed for visible art finishes
 - Can analyze an image palette and suggest likely single-layer or dual-color mappings
 - Can perform best-effort multi-color mapping, including on SVG input by rasterizing it for palette analysis

@@ -12,6 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def test_svg_example_generates_kicad_module(tmp_path: Path) -> None:
     output = tmp_path / "bitcoin_b.kicad_mod"
+    preview = tmp_path / "bitcoin_b_preview.png"
     example = REPO_ROOT / "examples" / "bitcoin_b.svg"
 
     subprocess.run(
@@ -26,6 +27,8 @@ def test_svg_example_generates_kicad_module(tmp_path: Path) -> None:
             "F.Cu",
             "--width-mm",
             "20",
+            "--preview-output",
+            str(preview),
             "--center",
         ],
         check=True,
@@ -37,6 +40,7 @@ def test_svg_example_generates_kicad_module(tmp_path: Path) -> None:
     assert "(attr board_only exclude_from_pos_files exclude_from_bom)" in text
     assert "(layer F.Cu)" in text
     assert "(fp_poly" in text
+    assert preview.exists()
 
 
 def test_dual_color_generates_combined_layers_and_presets(tmp_path: Path) -> None:
