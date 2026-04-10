@@ -289,6 +289,12 @@ def parse_args() -> argparse.Namespace:
         help="RGB triple to retain in single-layer raster mode, for example 0,0,0",
     )
     parser.add_argument(
+        "--bitmap-processing",
+        choices=["raster", "vectorize"],
+        default="raster",
+        help="How to process single-layer bitmap inputs: keep a raster-style mask or vectorize with potrace",
+    )
+    parser.add_argument(
         "--background-rgb",
         help="RGB triple to explicitly ignore in single-layer raster mode, for example 255,255,255",
     )
@@ -452,6 +458,7 @@ def main() -> None:
                     tmpdir=tmpdir,
                     foreground_rgb=parse_optional_rgb_triplet(args.foreground_rgb),
                     background_rgb=parse_optional_rgb_triplet(args.background_rgb),
+                    bitmap_processing=args.bitmap_processing,
                     color_tolerance=args.color_tolerance,
                     preview_output=preview_output_for_target(
                         preview_output, output_path, target_width_mm, args
@@ -840,11 +847,11 @@ def generate_single_layer_module(
     tmpdir: Path,
     foreground_rgb: tuple[int, int, int] | None,
     background_rgb: tuple[int, int, int] | None,
+    bitmap_processing: str,
     color_tolerance: int,
     preview_output: Path | None,
 ) -> None:
     if input_path.suffix.lower() in RASTER_SUFFIXES:
-        svg_input = tmpdir / f"{input_path.stem}.svg"
         selection = raster_to_selection(
             input_path=input_path,
             threshold=threshold,
@@ -855,10 +862,6 @@ def generate_single_layer_module(
             background_rgb=background_rgb,
             color_tolerance=color_tolerance,
         )
-        rectangles = merge_row_runs(selection.rows)
-        if not rectangles:
-            raise SystemExit("No visible art remained after raster processing.")
-        write_svg_rects(svg_input, selection.width, selection.height, rectangles)
         if preview_output is not None:
             write_preview_png(
                 rows=selection.rows,
@@ -868,6 +871,15 @@ def generate_single_layer_module(
                 output_path=preview_output,
             )
         size = ArtworkSize(width_px=float(selection.width), height_px=float(selection.height))
+        if bitmap_processing == "vectorize":
+            svg_input = tmpdir / f"{input_path.stem}_trace.svg"
+            vectorize_selection_to_svg(selection, svg_input, tmpdir)
+        else:
+            svg_input = tmpdir / f"{input_path.stem}.svg"
+            rectangles = merge_row_runs(selection.rows)
+            if not rectangles:
+                raise SystemExit("No visible art remained after raster processing.")
+            write_svg_rects(svg_input, selection.width, selection.height, rectangles)
     else:
         svg_input = input_path
         size = load_svg_size(svg_input)
@@ -891,7 +903,6 @@ def generate_single_layer_module(
                 color=preset.preview_color,
                 output_path=preview_output,
             )
-
     scale_factor = compute_scale_factor(
         size=size,
         dpi=dpi,
@@ -1201,6 +1212,25 @@ def preview_selection_from_svg(
         background_rgb=background_rgb,
         color_tolerance=color_tolerance,
     )
+
+
+def vectorize_selection_to_svg(selection: RasterSelection, output_svg: Path, tmpdir: Path) -> None:
+    pbm_path = tmpdir / "trace_input.pbm"
+    bitmap = Image.new("1", (selection.width, selection.height), 1)
+    pixels = bitmap.load()
+    for y, runs in enumerate(selection.rows):
+        for x0, x1 in runs:
+            for x in range(x0, x1):
+                pixels[x, y] = 0
+    bitmap.save(pbm_path)
+    command = [
+        "potrace",
+        "-s",
+        "-o",
+        str(output_svg),
+        str(pbm_path),
+    ]
+    subprocess.run(command, check=True)
 
 
 def render_svg_to_png(input_path: Path, output_path: Path, render_width: int) -> None:

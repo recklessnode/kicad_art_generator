@@ -19,3 +19,4 @@
 - Added quality presets so SVG and raster outputs can retain more detail when sharper footprints are needed.
 - Improved SVG multi-color mapping to preserve declared source colors as separate families before falling back to rendered palette clustering.
 - Added preview generation for single-color SVG paths as well, so preview coverage now spans SVG and PNG single-color and color-split workflows.
+- Added a `potrace`-backed vectorization option for single-color bitmap inputs to reduce coarse raster-style output.

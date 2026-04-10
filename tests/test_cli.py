@@ -185,6 +185,44 @@ def test_single_layer_color_match_and_preview(tmp_path: Path) -> None:
     assert preview.exists()
 
 
+def test_single_layer_vectorize_bitmap_processing(tmp_path: Path) -> None:
+    image_path = tmp_path / "formula.png"
+    output = tmp_path / "formula.kicad_mod"
+
+    image = Image.new("RGBA", (80, 30), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.line((5, 20, 75, 20), fill=(0, 0, 0, 255), width=3)
+    draw.text((10, 2), "2", fill=(0, 0, 0, 255))
+    image.save(image_path)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--output",
+            str(output),
+            "--layer",
+            "F.SilkS",
+            "--width-mm",
+            "20",
+            "--foreground-rgb",
+            "0,0,0",
+            "--background-rgb",
+            "255,255,255",
+            "--bitmap-processing",
+            "vectorize",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "(module formula" in text
+    assert "(layer F.SilkS)" in text
+
+
 def test_single_layer_copper_exposed_preset_adds_mask(tmp_path: Path) -> None:
     image_path = tmp_path / "blob.png"
     output = tmp_path / "blob.kicad_mod"

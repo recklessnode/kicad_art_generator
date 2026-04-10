@@ -171,6 +171,24 @@ kicad-art cholla_cactus.png \
   --preview-output output/cholla_cactus_silks_preview.png
 ```
 
+Vectorize a single-color bitmap with `potrace` before footprint generation:
+
+```bash
+. .venv/bin/activate
+kicad-art "Bitcoin Emission Formula V3.png" \
+  --output output/bitcoin_emission_formula_v3_vectorized.kicad_mod \
+  --footprint-name bitcoin_emission_formula_v3_vectorized \
+  --art-preset silkscreen \
+  --width-mm 90 \
+  --quality high \
+  --foreground-rgb 0,0,0 \
+  --background-rgb 255,255,255 \
+  --color-tolerance 48 \
+  --bitmap-processing vectorize \
+  --preview-output output/bitcoin_emission_formula_v3_vectorized_preview.png \
+  --center
+```
+
 Export directly into a KiCad footprint library:
 
 ```bash
@@ -241,6 +259,7 @@ kicad-art "RecklessSystemsLogoWhiteColor.svg" \
 - Can analyze an image palette and suggest likely single-layer or dual-color mappings
 - Can perform best-effort multi-color mapping, including on SVG input by rasterizing it for palette analysis
 - Supports quality presets so you can trade output sharpness against footprint size and generation cost
+- Supports optional `potrace` vectorization for single-color bitmap inputs
 - Lets you target a specific KiCad layer such as `F.Cu`, `B.Cu`, `F.SilkS`, or `B.Mask`
 - Lets you size the output by width or height in millimeters
 - Supports preset width generation in inches for reusable art families
@@ -286,6 +305,7 @@ Main options:
 - `--yellow-preset`: named preset for the first matched color in dual-color mode
 - `--white-preset`: named preset for the second matched color in dual-color mode
 - `--foreground-rgb`: retain this color in single-layer raster mode
+- `--bitmap-processing`: choose `raster` or `vectorize` for single-color bitmap inputs
 - `--background-rgb`: explicitly ignore this color in single-layer raster mode
 - `--preview-output`: write a PNG preview of the retained artwork in the chosen layer color
 - `--pretty-dir`: copy generated `.kicad_mod` files directly into a target `.pretty` library directory
@@ -378,6 +398,8 @@ For black-on-white line art, a simpler workflow works well:
 1. Point `--foreground-rgb` at the ink color you want to keep, such as `0,0,0`.
 2. Point `--background-rgb` at the paper color you want to discard, such as `255,255,255`.
 3. Use `--preview-output` to quickly confirm the retained geometry before importing the footprint into KiCad.
+
+If the bitmap result still looks too blocky, switch `--bitmap-processing vectorize` to route the selected monochrome mask through `potrace` before generating the footprint.
 
 If an image is very large or detailed, reduce `--max-dimension` to keep the generated footprint smaller and easier to manage.
 
