@@ -189,6 +189,24 @@ kicad-art "Bitcoin Emission Formula V3.png" \
   --center
 ```
 
+Generate a smaller all-vector variant when you want cleaner paths but a lighter output file:
+
+```bash
+. .venv/bin/activate
+kicad-art "Bitcoin Emission Formula V3.png" \
+  --output output/bitcoin_emission_formula_v3_vectorized_compact.kicad_mod \
+  --footprint-name bitcoin_emission_formula_v3_vectorized_compact \
+  --art-preset silkscreen \
+  --width-mm 90 \
+  --quality high \
+  --foreground-rgb 0,0,0 \
+  --background-rgb 255,255,255 \
+  --color-tolerance 48 \
+  --bitmap-processing vectorize-compact \
+  --preview-output output/bitcoin_emission_formula_v3_vectorized_compact_preview.png \
+  --center
+```
+
 Export directly into a KiCad footprint library:
 
 ```bash
@@ -260,6 +278,7 @@ kicad-art "RecklessSystemsLogoWhiteColor.svg" \
 - Can perform best-effort multi-color mapping, including on SVG input by rasterizing it for palette analysis
 - Supports quality presets so you can trade output sharpness against footprint size and generation cost
 - Supports optional `potrace` vectorization for single-color bitmap inputs
+- Supports a compact vectorized bitmap mode for smaller all-vector footprints
 - Lets you target a specific KiCad layer such as `F.Cu`, `B.Cu`, `F.SilkS`, or `B.Mask`
 - Lets you size the output by width or height in millimeters
 - Supports preset width generation in inches for reusable art families
@@ -305,7 +324,7 @@ Main options:
 - `--yellow-preset`: named preset for the first matched color in dual-color mode
 - `--white-preset`: named preset for the second matched color in dual-color mode
 - `--foreground-rgb`: retain this color in single-layer raster mode
-- `--bitmap-processing`: choose `raster` or `vectorize` for single-color bitmap inputs
+- `--bitmap-processing`: choose `raster`, `vectorize`, or `vectorize-compact` for single-color bitmap inputs
 - `--background-rgb`: explicitly ignore this color in single-layer raster mode
 - `--preview-output`: write a PNG preview of the retained artwork in the chosen layer color
 - `--pretty-dir`: copy generated `.kicad_mod` files directly into a target `.pretty` library directory
@@ -400,6 +419,8 @@ For black-on-white line art, a simpler workflow works well:
 3. Use `--preview-output` to quickly confirm the retained geometry before importing the footprint into KiCad.
 
 If the bitmap result still looks too blocky, switch `--bitmap-processing vectorize` to route the selected monochrome mask through `potrace` before generating the footprint.
+
+If the fully vectorized result is cleaner but too large, use `--bitmap-processing vectorize-compact` to downsample slightly before tracing and produce a smaller all-vector output.
 
 If an image is very large or detailed, reduce `--max-dimension` to keep the generated footprint smaller and easier to manage.
 

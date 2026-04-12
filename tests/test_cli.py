@@ -223,6 +223,44 @@ def test_single_layer_vectorize_bitmap_processing(tmp_path: Path) -> None:
     assert "(layer F.SilkS)" in text
 
 
+def test_single_layer_vectorize_compact_bitmap_processing(tmp_path: Path) -> None:
+    image_path = tmp_path / "formula_compact.png"
+    output = tmp_path / "formula_compact.kicad_mod"
+
+    image = Image.new("RGBA", (120, 40), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.line((10, 28, 110, 28), fill=(0, 0, 0, 255), width=3)
+    draw.text((18, 4), "210", fill=(0, 0, 0, 255))
+    image.save(image_path)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--output",
+            str(output),
+            "--layer",
+            "F.SilkS",
+            "--width-mm",
+            "20",
+            "--foreground-rgb",
+            "0,0,0",
+            "--background-rgb",
+            "255,255,255",
+            "--bitmap-processing",
+            "vectorize-compact",
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+    )
+
+    text = output.read_text(encoding="utf-8")
+    assert "(module formula_compact" in text
+    assert "(layer F.SilkS)" in text
+
+
 def test_single_layer_copper_exposed_preset_adds_mask(tmp_path: Path) -> None:
     image_path = tmp_path / "blob.png"
     output = tmp_path / "blob.kicad_mod"

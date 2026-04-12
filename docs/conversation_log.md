@@ -20,3 +20,4 @@
 - Improved SVG multi-color mapping to preserve declared source colors as separate families before falling back to rendered palette clustering.
 - Added preview generation for single-color SVG paths as well, so preview coverage now spans SVG and PNG single-color and color-split workflows.
 - Added a `potrace`-backed vectorization option for single-color bitmap inputs to reduce coarse raster-style output.
+- Added a compact all-vector bitmap mode that keeps the `potrace` path but reduces output size for cleaner practical footprints.

@@ -121,6 +121,17 @@ HELP_EXAMPLES = """Examples:
       --preview-output output/reckless_svg_multicolor_hq_preview.png \\
       --quality high \\
       --center
+
+  Produce a smaller all-vector bitmap result:
+    kicad-art "Bitcoin Emission Formula V3.png" \\
+      --output output/bitcoin_emission_formula_v3_vectorized_compact.kicad_mod \\
+      --footprint-name bitcoin_emission_formula_v3_vectorized_compact \\
+      --art-preset silkscreen \\
+      --width-mm 90 \\
+      --foreground-rgb 0,0,0 \\
+      --background-rgb 255,255,255 \\
+      --bitmap-processing vectorize-compact \\
+      --center
 """
 
 
@@ -290,9 +301,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--bitmap-processing",
-        choices=["raster", "vectorize"],
+        choices=["raster", "vectorize", "vectorize-compact"],
         default="raster",
-        help="How to process single-layer bitmap inputs: keep a raster-style mask or vectorize with potrace",
+        help="How to process single-layer bitmap inputs: keep a raster-style mask, vectorize with potrace, or create a smaller compact vectorized output",
     )
     parser.add_argument(
         "--background-rgb",
@@ -871,9 +882,14 @@ def generate_single_layer_module(
                 output_path=preview_output,
             )
         size = ArtworkSize(width_px=float(selection.width), height_px=float(selection.height))
-        if bitmap_processing == "vectorize":
+        if bitmap_processing in {"vectorize", "vectorize-compact"}:
             svg_input = tmpdir / f"{input_path.stem}_trace.svg"
-            vectorize_selection_to_svg(selection, svg_input, tmpdir)
+            vectorize_selection_to_svg(
+                selection,
+                svg_input,
+                tmpdir,
+                compact=(bitmap_processing == "vectorize-compact"),
+            )
         else:
             svg_input = tmpdir / f"{input_path.stem}.svg"
             rectangles = merge_row_runs(selection.rows)
@@ -1214,22 +1230,43 @@ def preview_selection_from_svg(
     )
 
 
-def vectorize_selection_to_svg(selection: RasterSelection, output_svg: Path, tmpdir: Path) -> None:
+def vectorize_selection_to_svg(
+    selection: RasterSelection,
+    output_svg: Path,
+    tmpdir: Path,
+    compact: bool = False,
+) -> None:
     pbm_path = tmpdir / "trace_input.pbm"
-    bitmap = Image.new("1", (selection.width, selection.height), 1)
+    scale_divisor = 2 if compact else 1
+    target_width = max(1, selection.width // scale_divisor)
+    target_height = max(1, selection.height // scale_divisor)
+    bitmap = Image.new("1", (target_width, target_height), 1)
     pixels = bitmap.load()
     for y, runs in enumerate(selection.rows):
         for x0, x1 in runs:
-            for x in range(x0, x1):
-                pixels[x, y] = 0
+            if compact:
+                y_scaled = min(target_height - 1, y // scale_divisor)
+                for x in range(x0, x1):
+                    x_scaled = min(target_width - 1, x // scale_divisor)
+                    pixels[x_scaled, y_scaled] = 0
+            else:
+                for x in range(x0, x1):
+                    pixels[x, y] = 0
     bitmap.save(pbm_path)
     command = [
         "potrace",
         "-s",
+        "--turdsize",
+        "6" if compact else "2",
+        "--opttolerance",
+        "0.5" if compact else "0.2",
         "-o",
         str(output_svg),
         str(pbm_path),
     ]
+    command.insert(2, "--flat" if compact else "--longcurve")
+    if compact:
+        command.extend(["--unit", "2"])
     subprocess.run(command, check=True)
 
 

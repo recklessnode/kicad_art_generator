@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kicad-art-generator"
-version = "0.1.0"
+version = "0.2.0"
 description = "Linux-first KiCad art footprint generator for Ubuntu and WSL"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -33,4 +33,3 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
