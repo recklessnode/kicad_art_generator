@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cat <<'EOF'
-Ubuntu / WSL prerequisites expected by this project:
+Linux prerequisites expected by this project:
   python3-venv
   python3-pip
   python3-dev
@@ -13,15 +13,15 @@ Ubuntu / WSL prerequisites expected by this project:
   libcairo2-dev
   libgirepository1.0-dev
   gir1.2-rsvg-2.0
+  potrace
 
-Graphics tools currently present in the target WSL environment and useful for source-asset prep:
-  gimp
+Optional graphics tools that can be useful for source-asset prep:
   inkscape
   rsvg-convert
 
 If they are missing, install them with:
   sudo apt-get update
-  sudo apt-get install -y python3-venv python3-pip python3-dev build-essential pkg-config libcairo2-dev libgirepository1.0-dev gir1.2-rsvg-2.0
+  sudo apt-get install -y python3-venv python3-pip python3-dev build-essential pkg-config libcairo2-dev libgirepository1.0-dev gir1.2-rsvg-2.0 potrace
 EOF
 
 python3 -m venv "${ROOT_DIR}/.venv"

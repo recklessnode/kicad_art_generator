@@ -81,13 +81,13 @@ ART_PRESETS = {
 
 HELP_EXAMPLES = """Examples:
   Analyze an image first:
-    kicad-art "Cholla Energy.png" --mode analyze
+    kicad-art "logo.png" --mode analyze
 
   Generate a detailed dual-color ENIG-style logo:
-    kicad-art "Cholla Energy.png" \\
+    kicad-art "brand_mark.png" \\
       --mode dual-color \\
-      --output output/cholla_energy_enig_v2.kicad_mod \\
-      --footprint-name cholla_energy_enig_v2 \\
+      --output output/brand_mark_enig.kicad_mod \\
+      --footprint-name brand_mark_enig \\
       --width-mm 50 \\
       --yellow-rgb 246,226,0 \\
       --white-rgb 1,105,56 \\
@@ -97,14 +97,14 @@ HELP_EXAMPLES = """Examples:
       --adjacent-color-tolerance 64 \\
       --adjacent-shade-limit 16 \\
       --alpha-threshold 32 \\
-      --preview-output output/cholla_energy_enig_v2_preview.png \\
+      --preview-output output/brand_mark_enig_preview.png \\
       --quality high \\
       --center
 
   Export directly into a KiCad library bundle:
-    kicad-art cholla_cactus.png \\
-      --output output/cholla_cactus_silks.kicad_mod \\
-      --footprint-name cholla_cactus_silks \\
+    kicad-art line_art.png \\
+      --output output/line_art_silks.kicad_mod \\
+      --footprint-name line_art_silks \\
       --width-mm 50 \\
       --foreground-rgb 0,0,0 \\
       --background-rgb 255,255,255 \\
@@ -112,20 +112,20 @@ HELP_EXAMPLES = """Examples:
       --library-name PromoArt
 
   Push SVG detail higher when needed:
-    kicad-art "RecklessSystemsLogoWhiteColor.svg" \\
+    kicad-art "logo_color.svg" \\
       --mode multi-color \\
-      --output output/reckless_svg_multicolor_hq.kicad_mod \\
-      --footprint-name reckless_svg_multicolor_hq \\
+      --output output/logo_color_hq.kicad_mod \\
+      --footprint-name logo_color_hq \\
       --width-mm 60 \\
       --multi-color-presets silkscreen,copper-exposed,copper-covered,substrate-exposed \\
-      --preview-output output/reckless_svg_multicolor_hq_preview.png \\
+      --preview-output output/logo_color_hq_preview.png \\
       --quality high \\
       --center
 
   Produce a smaller all-vector bitmap result:
-    kicad-art "Bitcoin Emission Formula V3.png" \\
-      --output output/bitcoin_emission_formula_v3_vectorized_compact.kicad_mod \\
-      --footprint-name bitcoin_emission_formula_v3_vectorized_compact \\
+    kicad-art "formula.png" \\
+      --output output/formula_vectorized_compact.kicad_mod \\
+      --footprint-name formula_vectorized_compact \\
       --art-preset silkscreen \\
       --width-mm 90 \\
       --foreground-rgb 0,0,0 \\

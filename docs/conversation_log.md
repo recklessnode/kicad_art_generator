@@ -1,23 +1,10 @@
 # Conversation Log
 
-## 2026-04-05
+## 2026-04-05 to 2026-04-12
 
-- Created the private `kicad_art_generator` repository and bootstrapped a Linux-first WSL workflow.
-- Added the initial CLI for SVG and raster to KiCad footprint generation.
-- Logged the Ubuntu and WSL prerequisites in the setup script and README.
-- Extended the workflow to match the original goal: two-color PNG processing with yellow mapped to copper, white mapped to silkscreen, combined into a single reusable footprint, with 1 inch, 2 inch, and 4 inch preset generation.
-- Added a simpler single-layer raster workflow with explicit foreground and background color matching, plus green-board preview PNG output.
-- Validated the real `cholla_cactus.png` asset as black art on `F.SilkS` while ignoring the white background.
-- Extended sizing so output generation is explicitly parametric for custom batch sizes in either inches or millimeters, not just the default preset-size workflow.
-- Added named art presets for silkscreen, exposed copper, covered copper, and exposed substrate tones, including mask-opening behavior where needed.
-- Added dual-color preview generation and validated the `Cholla Energy.png` logo as exposed ENIG-style yellow copper plus green silkscreen.
-- Added direct `.pretty` export support so generated footprints can be written straight into a KiCad footprint library.
-- Improved dual-color extraction so it absorbs adjacent shades around the primary colors, fixing missing darker-green text in the Cholla logo workflow.
-- Added an `analyze` mode that inspects dominant opaque color clusters, suggests mappings, and explicitly warns when an image palette is too ambiguous.
-- Added a library-bundle export flow that creates a named `.pretty` library plus KiCad import metadata, and expanded CLI help with real-world multi-line examples.
-- Added best-effort multi-color SVG support by rasterizing SVG input for palette analysis and mapping dominant visible color families to preset PCB art finishes.
-- Added quality presets so SVG and raster outputs can retain more detail when sharper footprints are needed.
-- Improved SVG multi-color mapping to preserve declared source colors as separate families before falling back to rendered palette clustering.
-- Added preview generation for single-color SVG paths as well, so preview coverage now spans SVG and PNG single-color and color-split workflows.
-- Added a `potrace`-backed vectorization option for single-color bitmap inputs to reduce coarse raster-style output.
-- Added a compact all-vector bitmap mode that keeps the `potrace` path but reduces output size for cleaner practical footprints.
+- Bootstrapped the repository and built out the core KiCad art generation workflows.
+- Added single-color, dual-color, multi-color, preview, analysis, and library export modes.
+- Added named PCB art presets for silkscreen, exposed copper, covered copper, exposed substrate, and user drawings.
+- Added parametric sizing, richer help examples, and public release packaging.
+- Improved SVG handling, including better source-color preservation and preview generation.
+- Added `potrace`-based bitmap vectorization and a compact all-vector option.

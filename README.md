@@ -1,6 +1,6 @@
 # kicad_art_generator
 
-Linux-first KiCad art footprint generation for Ubuntu and WSL.
+Linux-first KiCad art footprint generation.
 
 This project wraps `svg2mod` with a simpler CLI so you can turn:
 
@@ -10,9 +10,9 @@ This project wraps `svg2mod` with a simpler CLI so you can turn:
 
 The output is a standard `.kicad_mod` footprint that can be dropped into a `.pretty` library and used in KiCad.
 
-## Ubuntu / WSL prerequisites
+## Linux prerequisites
 
-These are the Ubuntu packages currently expected by the setup flow, including the ones you installed manually in WSL:
+These are the Linux packages currently expected by the setup flow:
 
 ```bash
 sudo apt-get update
@@ -24,13 +24,13 @@ sudo apt-get install -y \
   pkg-config \
   libcairo2-dev \
   libgirepository1.0-dev \
-  gir1.2-rsvg-2.0
+  gir1.2-rsvg-2.0 \
+  potrace
 ```
 
-Additional graphics tools currently available in your WSL environment and useful for preparing source artwork:
+Optional graphics tools that can be useful for preparing source artwork:
 
 ```bash
-gimp
 inkscape
 rsvg-convert
 ```
@@ -43,7 +43,7 @@ Then bootstrap the project:
 
 ## Quick start
 
-Clone into WSL and install:
+Clone and install:
 
 ```bash
 git clone https://github.com/recklessnode/kicad_art_generator.git
@@ -62,14 +62,14 @@ Analyze an image first and get a suggested mapping:
 
 ```bash
 . .venv/bin/activate
-kicad-art "Cholla Energy.png" --mode analyze
+kicad-art "logo.png" --mode analyze
 ```
 
 Analyze a multi-color SVG and get a best-effort mapping suggestion:
 
 ```bash
 . .venv/bin/activate
-kicad-art "RecklessSystemsLogoWhiteColor.svg" \
+kicad-art "logo_color.svg" \
   --mode analyze \
   --svg-render-width 1024
 ```
@@ -97,10 +97,10 @@ Generate a dual-color ENIG-style logo preview, with yellow exposed copper and gr
 
 ```bash
 . .venv/bin/activate
-kicad-art "Cholla Energy.png" \
+kicad-art "brand_mark.png" \
   --mode dual-color \
-  --output output/cholla_energy_enig.kicad_mod \
-  --footprint-name cholla_energy_enig \
+  --output output/brand_mark_enig.kicad_mod \
+  --footprint-name brand_mark_enig \
   --width-mm 50 \
   --yellow-rgb 246,226,0 \
   --white-rgb 1,105,56 \
@@ -108,7 +108,7 @@ kicad-art "Cholla Energy.png" \
   --white-preset silkscreen \
   --color-tolerance 32 \
   --alpha-threshold 32 \
-  --preview-output output/cholla_energy_enig_preview.png \
+  --preview-output output/brand_mark_enig_preview.png \
   --center
 ```
 
@@ -116,10 +116,10 @@ If a logo uses close shades of the same color, widen the adjacent-shade match so
 
 ```bash
 . .venv/bin/activate
-kicad-art "Cholla Energy.png" \
+kicad-art "brand_mark.png" \
   --mode dual-color \
-  --output output/cholla_energy_enig_v2.kicad_mod \
-  --footprint-name cholla_energy_enig_v2 \
+  --output output/brand_mark_enig_refined.kicad_mod \
+  --footprint-name brand_mark_enig_refined \
   --width-mm 50 \
   --yellow-rgb 246,226,0 \
   --white-rgb 1,105,56 \
@@ -129,7 +129,7 @@ kicad-art "Cholla Energy.png" \
   --adjacent-color-tolerance 64 \
   --adjacent-shade-limit 16 \
   --alpha-threshold 32 \
-  --preview-output output/cholla_energy_enig_v2_preview.png \
+  --preview-output output/brand_mark_enig_refined_preview.png \
   --center
 ```
 
@@ -161,23 +161,23 @@ Generate single-layer black-on-white art, ignore the white background, and emit 
 
 ```bash
 . .venv/bin/activate
-kicad-art cholla_cactus.png \
-  --output output/cholla_cactus_silks.kicad_mod \
+kicad-art line_art.png \
+  --output output/line_art_silks.kicad_mod \
   --layer F.SilkS \
   --width-mm 50 \
   --foreground-rgb 0,0,0 \
   --background-rgb 255,255,255 \
   --color-tolerance 16 \
-  --preview-output output/cholla_cactus_silks_preview.png
+  --preview-output output/line_art_silks_preview.png
 ```
 
 Vectorize a single-color bitmap with `potrace` before footprint generation:
 
 ```bash
 . .venv/bin/activate
-kicad-art "Bitcoin Emission Formula V3.png" \
-  --output output/bitcoin_emission_formula_v3_vectorized.kicad_mod \
-  --footprint-name bitcoin_emission_formula_v3_vectorized \
+kicad-art "formula.png" \
+  --output output/formula_vectorized.kicad_mod \
+  --footprint-name formula_vectorized \
   --art-preset silkscreen \
   --width-mm 90 \
   --quality high \
@@ -185,7 +185,7 @@ kicad-art "Bitcoin Emission Formula V3.png" \
   --background-rgb 255,255,255 \
   --color-tolerance 48 \
   --bitmap-processing vectorize \
-  --preview-output output/bitcoin_emission_formula_v3_vectorized_preview.png \
+  --preview-output output/formula_vectorized_preview.png \
   --center
 ```
 
@@ -193,9 +193,9 @@ Generate a smaller all-vector variant when you want cleaner paths but a lighter 
 
 ```bash
 . .venv/bin/activate
-kicad-art "Bitcoin Emission Formula V3.png" \
-  --output output/bitcoin_emission_formula_v3_vectorized_compact.kicad_mod \
-  --footprint-name bitcoin_emission_formula_v3_vectorized_compact \
+kicad-art "formula.png" \
+  --output output/formula_vectorized_compact.kicad_mod \
+  --footprint-name formula_vectorized_compact \
   --art-preset silkscreen \
   --width-mm 90 \
   --quality high \
@@ -203,7 +203,7 @@ kicad-art "Bitcoin Emission Formula V3.png" \
   --background-rgb 255,255,255 \
   --color-tolerance 48 \
   --bitmap-processing vectorize-compact \
-  --preview-output output/bitcoin_emission_formula_v3_vectorized_compact_preview.png \
+  --preview-output output/formula_vectorized_compact_preview.png \
   --center
 ```
 
@@ -211,8 +211,8 @@ Export directly into a KiCad footprint library:
 
 ```bash
 . .venv/bin/activate
-kicad-art cholla_cactus.png \
-  --output output/cholla_cactus_silks.kicad_mod \
+kicad-art line_art.png \
+  --output output/line_art_silks.kicad_mod \
   --layer F.SilkS \
   --width-mm 50 \
   --foreground-rgb 0,0,0 \
@@ -224,9 +224,9 @@ Create a fuller KiCad library bundle that can be imported into a project wholesa
 
 ```bash
 . .venv/bin/activate
-kicad-art cholla_cactus.png \
-  --output output/cholla_cactus_bundle.kicad_mod \
-  --footprint-name cholla_cactus_bundle \
+kicad-art line_art.png \
+  --output output/line_art_bundle.kicad_mod \
+  --footprint-name line_art_bundle \
   --width-mm 50 \
   --foreground-rgb 0,0,0 \
   --background-rgb 255,255,255 \
@@ -238,13 +238,13 @@ Generate a best-effort multi-color footprint from an SVG by consuming the domina
 
 ```bash
 . .venv/bin/activate
-kicad-art "RecklessSystemsLogoWhiteColor.svg" \
+kicad-art "logo_color.svg" \
   --mode multi-color \
-  --output output/reckless_svg_multicolor.kicad_mod \
-  --footprint-name reckless_svg_multicolor \
+  --output output/logo_color_multicolor.kicad_mod \
+  --footprint-name logo_color_multicolor \
   --width-mm 60 \
   --multi-color-presets silkscreen,copper-exposed,copper-covered,substrate-exposed \
-  --preview-output output/reckless_svg_multicolor_preview.png \
+  --preview-output output/logo_color_multicolor_preview.png \
   --svg-render-width 1024 \
   --center
 ```
@@ -253,13 +253,13 @@ If the result looks too grainy, increase detail retention:
 
 ```bash
 . .venv/bin/activate
-kicad-art "RecklessSystemsLogoWhiteColor.svg" \
+kicad-art "logo_color.svg" \
   --mode multi-color \
-  --output output/reckless_svg_multicolor_hq.kicad_mod \
-  --footprint-name reckless_svg_multicolor_hq \
+  --output output/logo_color_multicolor_hq.kicad_mod \
+  --footprint-name logo_color_multicolor_hq \
   --width-mm 60 \
   --multi-color-presets silkscreen,copper-exposed,copper-covered,substrate-exposed \
-  --preview-output output/reckless_svg_multicolor_hq_preview.png \
+  --preview-output output/logo_color_multicolor_hq_preview.png \
   --quality high \
   --center
 ```
@@ -430,7 +430,7 @@ Commit-time history is tracked in [docs/conversation_log.md](/Users/prael/Docume
 
 ## Development
 
-Run the checks from WSL:
+Run the checks:
 
 ```bash
 . .venv/bin/activate

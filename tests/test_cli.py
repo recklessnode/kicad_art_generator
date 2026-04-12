@@ -386,8 +386,8 @@ def test_help_includes_thorough_example() -> None:
         capture_output=True,
     )
 
-    assert 'kicad-art "Cholla Energy.png" \\' in result.stdout
-    assert "--yellow-preset copper-exposed" in result.stdout
+    assert 'kicad-art "brand_mark.png" \\' in result.stdout
+    assert "--bitmap-processing vectorize-compact" in result.stdout
     assert "--library-root ./libraries" in result.stdout
 
 
@@ -570,3 +570,84 @@ def test_analyze_mode_suggests_multi_color_mapping(tmp_path: Path) -> None:
 
     assert "multi-color art" in result.stdout
     assert "255,255,255 -> silkscreen" in result.stdout
+
+
+def test_missing_output_fails_outside_analyze_mode(tmp_path: Path) -> None:
+    image_path = tmp_path / "simple.png"
+    image = Image.new("RGBA", (10, 10), (255, 255, 255, 255))
+    image.save(image_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "--output is required unless --mode analyze is used." in result.stderr
+
+
+def test_invalid_pretty_dir_suffix_fails(tmp_path: Path) -> None:
+    image_path = tmp_path / "simple.png"
+    output = tmp_path / "simple.kicad_mod"
+    image = Image.new("RGBA", (10, 10), (0, 0, 0, 255))
+    image.save(image_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--output",
+            str(output),
+            "--foreground-rgb",
+            "0,0,0",
+            "--background-rgb",
+            "255,255,255",
+            "--pretty-dir",
+            str(tmp_path / "NotAPrettyDir"),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "--pretty-dir must point to a .pretty directory" in result.stderr
+
+
+def test_library_root_and_name_must_be_paired(tmp_path: Path) -> None:
+    image_path = tmp_path / "simple.png"
+    output = tmp_path / "simple.kicad_mod"
+    image = Image.new("RGBA", (10, 10), (0, 0, 0, 255))
+    image.save(image_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "kicad_art_generator.cli",
+            str(image_path),
+            "--output",
+            str(output),
+            "--foreground-rgb",
+            "0,0,0",
+            "--background-rgb",
+            "255,255,255",
+            "--library-root",
+            str(tmp_path / "library"),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "--library-root and --library-name must be provided together." in result.stderr
