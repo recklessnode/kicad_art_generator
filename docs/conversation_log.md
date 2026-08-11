@@ -703,3 +703,44 @@ Scheduled as v2. It sits naturally inside the rebuild's `legalize.py`, which
 already reasons about per-tone minimum feature — a hatch is a legal rendering of
 a value *between* two palette entries under the same constraints. v1 must not
 preclude it, and the chosen architecture does not.
+
+---
+
+## 2026-08-11 09:35 UTC — Microprinting assessed
+
+**Models:** Opus 5 (analysis, verification).
+
+Achievable in **copper only**, at ~2–3× coarser than banknote microprinting.
+Spec added to `docs/pcb-palette.md`.
+
+Etching is photolithographic and silkscreen is a mesh print, so copper is about
+twice as fine — that difference decides it. Silk bottoms out at ~0.9–1.2 mm
+character height (small text, not microprinting); copper at a capable fab
+reaches **0.5–0.7 mm**. Banknote reference is 0.15–0.25 mm.
+
+At 0.5 mm and 300 mm viewing, text subtends ~5.7 arcmin against a ~5 arcmin
+recognition threshold — a hairline to the eye, legible under a loupe. The effect
+holds even though the scale does not match currency.
+
+Verified `fp_text` on `F.Cu` renders correctly at 0.5 mm/0.075 mm and
+0.3 mm/0.05 mm, and costs **468 bytes for two whole strings** because KiCad's
+stroke font is built in. Text must stay text — glyph outlines as `fp_poly` would
+be orders of magnitude worse. Useful contrast with hatching at 153 bytes/segment.
+
+Two findings that shape how it gets used:
+
+**Never open the mask per glyph.** ±0.05 mm registration against a 0.075 mm
+stroke is two-thirds of the feature. Either open one rectangle over the whole
+text block with copper letterforms inside (gold on tan, T2 on T3, registration
+only places the block edge), or leave the mask closed entirely (T6) for a covert
+dark-on-dark sheen that is immune to registration.
+
+**The board's own rules reject it.** The Satoshi Starter sets
+`min_text_height 0.8 mm` / `min_text_thickness 0.08 mm` and routes nothing under
+0.2 mm, so 0.5 mm microtext violates its own DRC. Art must be excluded from
+those constraints — which the planned `RecklessArt` library-membership exclusion
+already handles, so no new machinery.
+
+Reliable zone is 0.6–0.8 mm; 0.5 mm is best-case and depends on the fab. At a
+0.075 mm stroke, ±0.025 mm etch tolerance is a third of the feature and glyphs
+degrade.

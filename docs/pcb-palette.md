@@ -216,3 +216,67 @@ This is a v2 feature. It sits naturally in the rebuild's `legalize.py`, which
 already reasons about per-tone minimum feature — a hatch is simply a legal way
 to render a value *between* two palette entries, subject to the same
 constraints. The v1 architecture should not preclude it, and does not.
+
+---
+
+# Microprinting
+
+Achievable, but **only in copper**, and at roughly 2–3× coarser than banknote
+microprinting. The effect still works; the scale does not match.
+
+## Why copper and not silkscreen
+
+Etching is photolithographic; silkscreen is a mesh screen print. Copper is
+about twice as fine, and that difference decides the whole question.
+
+| medium | min feature | implied min character height* |
+|---|---|---|
+| silkscreen | ~0.15 mm | **~0.9–1.2 mm** — not microprinting, just small text |
+| copper, typical fab | 0.127 mm (5 mil) | ~0.85 mm |
+| copper, capable fab | 0.075–0.09 mm | **~0.5–0.7 mm** ← the usable route |
+| *banknote reference* | — | *0.15–0.25 mm* |
+
+\* legible stroke-to-height runs about 1:6 to 1:8.
+
+At **0.5 mm** character height and 300 mm viewing distance, text subtends
+~5.7 arcmin. Character recognition needs roughly 5 arcmin, so it sits right at
+the threshold — **reads as a hairline to the naked eye, resolves under a loupe
+or a phone macro.** That is the microprinting effect, just at a coarser pitch
+than currency.
+
+## Do not open the mask per glyph
+
+Mask registration is ±0.05 mm. Against a 0.075 mm stroke that is two-thirds of
+the feature — per-glyph mask openings will not survive it. Two forms work:
+
+**1. One mask opening over the whole text block, copper letterforms inside.**
+Gold letters on bare laminate (T2 on T3). Registration only has to place the
+block edge, never a glyph edge. This is the high-contrast option.
+
+**2. Copper under mask, no opening at all** (T6). Dark-on-dark, extremely
+subtle, and immune to registration entirely. Genuinely covert — visible as a
+faint sheen at the right angle. Arguably the more interesting security feature.
+
+## Practical limits
+
+**Etch tolerance eats the margin.** At a 0.075 mm stroke, line-width tolerance
+of ±0.025 mm is a third of the feature, and glyph shapes degrade. Treat 0.5 mm
+as best-case and **0.6–0.8 mm as the reliable zone**.
+
+**Vendor capability varies sharply.** 0.127 mm (5 mil) is standard; 0.09 mm is
+an advanced option at extra cost; 0.075 mm needs a capable fab. Microprinting is
+a per-vendor decision, not a design constant.
+
+**The board's own rules will reject it.** The Satoshi Starter currently sets
+`min_text_height 0.8 mm` and `min_text_thickness 0.08 mm`, and routes nothing
+narrower than 0.2 mm. Microtext at 0.5 mm is a DRC violation *by the board's own
+configuration* — so art has to be excluded from those constraints. The
+`RecklessArt` library-membership exclusion already planned covers this; it does
+not need separate machinery.
+
+## Cost
+
+Negligible, and worth contrasting with hatching. `fp_text` uses KiCad's built-in
+stroke font, so a whole string is one object: **468 bytes for two complete
+strings**, measured. Glyph outlines as `fp_poly` would be orders of magnitude
+worse. Text stays text.
