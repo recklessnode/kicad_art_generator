@@ -280,3 +280,86 @@ Negligible, and worth contrasting with hatching. `fp_text` uses KiCad's built-in
 stroke font, so a whole string is one object: **468 bytes for two complete
 strings**, measured. Glyph outlines as `fp_poly` would be orders of magnitude
 worse. Text stays text.
+
+---
+
+# T8 — the translucent window
+
+Yes: strip mask from **both** faces and keep copper off **all four** layers, and
+the remaining laminate passes light. This is a real eighth tone, but it behaves
+unlike the other seven and deserves its own rules.
+
+## The light path
+
+```
+F.Mask   removed
+F.Cu     absent
+prepreg  0.10 mm
+In1.Cu   absent
+core     1.24 mm      <- 1.44 mm of FR4 total
+In2.Cu   absent
+prepreg  0.10 mm
+B.Cu     absent
+B.Mask   removed
+```
+
+**Diffuse, not clear.** FR4 is woven glass in epoxy: it scatters heavily and
+carries a yellow-green tint. At 1.44 mm expect frosted glass — a glow, not a
+view. You will see light *through* it, never shapes.
+
+**Mask must come off both faces.** Soldermask is largely opaque and black mask
+especially so. Mask remaining on either side kills the effect.
+
+## Yes, inner copper can be excluded
+
+Copper exists only where it is drawn, so "removing" it is really "never putting
+it there". The mechanism is a **keepout / rule area on every copper layer**.
+
+This matters more than it sounds, because the recommendation for
+`SatoshiStarter#3` is to make **In1.Cu a full ground plane**. Once In1 is a
+pour, it floods any window unless a keepout excludes it. So a translucent window
+is not the absence of drawing — it is four deliberate keepouts plus two mask
+openings.
+
+**The mechanism is already proven on this board.** Satoshi Starter carries three
+working keepouts inside the inductor footprint, with `copperpour not_allowed`,
+`tracks not_allowed`, `vias not_allowed`. Nothing new is required.
+
+## Why this tone is different
+
+**It needs six aligned layer operations** — four copper exclusions and two mask
+openings — so registration tolerance stacks across the whole stackup. **Bold
+shapes only.** No linework, no detail, no small features.
+
+**It only reads when lit.** Unlit, a T8 window is simply bare laminate — tan,
+close to T3. The tone exists only with a light source behind or at the edge.
+
+- **Backlit:** needs an LED on the reverse. The five existing LEDs are all
+  front-side through-hole, so this means adding one.
+- **Edge-lit:** FR4 is a mediocre light guide but works over short spans. Inject
+  at the board edge, scatter at the window.
+
+There is an obvious product idea here: this is a **miner**. An activity LED
+behind a translucent Satoshi window would glow as the board hashes — literal
+visible proof of work, on a board built to teach exactly that.
+
+## Mechanical notes
+
+- A copper-free window costs some stiffness. Fine at art scale; think twice at
+  structural scale or near mounting holes.
+- **Warpage is not a concern here.** Asymmetric copper warps boards; a void that
+  is absent on *all* layers is symmetric and behaves well.
+- Large bare-laminate exposure is unusual enough that some fabs query it or
+  surcharge. Confirm before committing a design to it.
+
+## Verification gap
+
+`pcbnew.ZONE_FILLER.Fill()` **segfaults (exit 139)** with a keepout-bearing
+footprint on the board, so there is no automated way to confirm a keepout
+actually knocks its hole in a filled pour. The GUI plainly works — this board
+fills with three keepouts present — so the mechanism is sound and only the
+*automated* check is unavailable.
+
+Same disposition as buried-copper void mode: **ship it, gate it behind a flag,
+and verify by opening the board once in the GUI and exporting the gerbers.**
+Five minutes, and it cannot be replaced by more automation.

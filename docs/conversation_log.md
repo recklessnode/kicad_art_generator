@@ -744,3 +744,46 @@ already handles, so no new machinery.
 Reliable zone is 0.6–0.8 mm; 0.5 mm is best-case and depends on the fab. At a
 0.075 mm stroke, ±0.025 mm etch tolerance is a third of the feature and glyphs
 degrade.
+
+---
+
+## 2026-08-11 09:55 UTC — T8: the translucent window
+
+**Models:** Opus 5 (analysis, verification).
+
+Question: on a 4-layer board, does hollowing a cell through every layer and
+stripping mask from both faces give a translucent window? **Yes.** Added to
+`docs/pcb-palette.md` as an eighth tone.
+
+Light path with no copper anywhere is **1.44 mm of FR4** (0.1 prepreg + 1.24
+core + 0.1 prepreg). That is translucent but **diffuse** — woven glass in epoxy
+scatters heavily and tints yellow-green. Frosted glass, not a window: light
+passes, shapes do not.
+
+**Inner copper can absolutely be excluded** — copper only exists where drawn, so
+this is keepouts on all four copper layers rather than "removal". That matters
+because the standing recommendation for `SatoshiStarter#3` is to make In1.Cu a
+full ground plane; once it is a pour it floods any window unless a keepout
+excludes it. Verified the mechanism is already working on this board: three
+keepouts inside the inductor footprint with `copperpour not_allowed`,
+`tracks not_allowed`, `vias not_allowed`.
+
+Three things make T8 unlike the other tones:
+
+- **Six aligned layer operations** (4 copper exclusions + 2 mask openings), so
+  registration stacks across the full stackup. Bold shapes only, no detail.
+- **It only exists when lit.** Unlit it is bare laminate, effectively T3. Needs
+  a reverse-side LED — all five existing LEDs are front-side THT — or edge
+  injection, where FR4 works as a mediocre but usable light guide.
+- **Warpage is not a risk**, counterintuitively: asymmetric copper warps boards,
+  and a void absent on *all* layers is symmetric.
+
+Product note worth carrying to the kit issues: this is a miner. An activity LED
+behind a translucent Satoshi window would glow while the board hashes — literal
+visible proof of work on a board built to teach it.
+
+Verification has the same gap as buried void mode: `ZONE_FILLER.Fill()`
+segfaults with a keepout-bearing footprint, so no automated confirmation that
+the keepout knocks its hole in a filled pour. The GUI plainly works — this board
+fills with three keepouts — so the mechanism is sound and only automation is
+blocked. Ship behind a flag; verify once by hand in the GUI and export gerbers.
