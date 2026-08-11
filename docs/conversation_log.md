@@ -663,3 +663,43 @@ count, coverage and mean ΔE. **Ronald looks at it and says yes or no before
 anything else is written.** That is the right gate — every downstream estimate
 depends on the quantiser actually being better, and that is a judgement only he
 can make.
+
+---
+
+## 2026-08-11 09:15 UTC — Hatching / stippling assessed and specified
+
+**Models:** Opus 5 (analysis, verification).
+
+Question raised: can line-width variation or stippling produce shading between
+the seven discrete tones? **Yes**, and the spec is now in `docs/pcb-palette.md`.
+
+Verified locally that variable-width `fp_line` renders correctly — a generated
+hatch exported to SVG with distinct `stroke-width` values from 0.105 to 0.175 mm.
+
+Two findings worth recording:
+
+**The texture is always visible.** The eye resolves ~1 arcmin ≈ 0.087 mm at
+300 mm. The smallest halftone cell carrying eight levels off a 0.15 mm minimum
+silk feature is ~0.5 mm, which subtends ~5.7 arcmin — about 6× the resolving
+limit. PCB halftone is coarser than newsprint and will never blend. That makes
+it a *style* (engraving, banknote) rather than a way to fake continuous tone,
+which suits this board.
+
+**It is not automatically cheap.** `fp_line` carries its own stroke width so no
+filled geometry is needed, but one line holds one width — tonal variation along
+a line needs segmentation. Measured: **153 bytes/segment**, and a naive 25 mm
+square at 0.4 mm pitch with 1 mm segments produced **1,550 segments / 238 KB**,
+i.e. no better than the solid-fill problem being fixed. Quantising the ramp to
+~8 levels before segmenting takes it to roughly 500 segments / 76 KB. The rule
+is *quantise then segment*, never the reverse.
+
+Ranked by fabrication reliability: line-width modulation first (connected
+geometry, no dropout), then pitch modulation, then true stipple last (isolated
+silk dots near minimum size print inconsistently). And mask-opening hatching is
+capped around 60–70 % duty by the ~0.1 mm dam minimum, beyond which the mask
+between openings washes away and the hatch collapses to solid.
+
+Scheduled as v2. It sits naturally inside the rebuild's `legalize.py`, which
+already reasons about per-tone minimum feature — a hatch is a legal rendering of
+a value *between* two palette entries under the same constraints. v1 must not
+preclude it, and the chosen architecture does not.

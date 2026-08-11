@@ -142,3 +142,77 @@ each tone.
 
 Until that is done, treat the appearance column as ordinal — T1 lightest, T5
 darkest — rather than as colorimetry.
+
+---
+
+# Shading between tones: hatching and stippling
+
+The seven tones are discrete. Spatial modulation — varying line width, line
+pitch, or dot size — creates *apparent* intermediate values between them. This
+works on a PCB, with one governing caveat.
+
+## The caveat: at any fabricable size, the texture is visible
+
+The eye resolves roughly 1 arcminute. At a 300 mm viewing distance that is
+**0.087 mm**; at arm's length, ~0.12 mm.
+
+Minimum fabricable features are 0.15 mm (silk) and 0.1 mm (mask, copper). A
+halftone cell needs to be several times the minimum feature to carry useful
+levels — eight grey levels from a 0.15 mm minimum dot needs a cell around
+0.5 mm. At 300 mm that cell subtends **~5.7 arcmin, roughly 6× the resolving
+limit**.
+
+So PCB halftone is **coarser than newsprint** and will always read as visible
+texture rather than smooth tone. That is not a defect to engineer around — it
+is the medium. Design for a deliberate engraved or banknote look, not for
+invisible blending. Which happens to suit a Bitcoin-adjacent board rather well.
+
+## Technique ranking, by fabrication reliability
+
+**1. Line-width modulation (best).** Parallel or contour-following lines whose
+stroke width tracks source luminance. Connected geometry, so no isolated-feature
+dropout — screen printing handles lines far more reliably than small dots. This
+is the classic engraving technique and the right default.
+
+**2. Line-pitch modulation.** Constant width, varying spacing. Slightly less
+dynamic range, equally reliable.
+
+**3. Isolated dots / true stipple (riskiest).** Silk dots near the minimum size
+print inconsistently and drop out. Use only well above minimum, and expect
+vendor variation.
+
+## Where it earns its place
+
+Only between tone pairs with real contrast:
+
+| ramp | mechanism | value |
+|---|---|---|
+| **T5 → T1** black ↔ white | silk line width on mask | highest contrast — the primary ramp |
+| **T5 → T2** black ↔ gold | mask-opening width over copper | second ramp; watch dams |
+| T3 → T2 tan ↔ gold | copper width under an opening | narrow use |
+| T5 → T6 | copper width under mask | too subtle on black mask to be worth it |
+
+## Two hard constraints
+
+**Mask dams.** If hatching *mask openings*, the mask remaining between adjacent
+openings must stay above roughly 0.1 mm or it washes away in processing — at
+which point the hatch merges into one solid opening and the tone jumps to flat
+T2. This caps mask-hatch duty cycle at roughly 60–70 %, well short of solid.
+
+**Cost is not free.** `fp_line` carries its own `(stroke (width …))`, so
+variable width needs no filled geometry — but a line can only hold one width,
+so tonal variation *along* a line requires splitting it into segments. Measured
+here: **153 bytes per segment**, and a naive 25 mm square hatched at 0.4 mm
+pitch with 1 mm segments came to **1,550 segments / 238 KB** — no better than
+the solid-fill problem being fixed.
+
+The fix is adaptive segmentation: split only where the width changes by a
+meaningful step. Eight tonal levels rather than 25 takes the same square to
+roughly 500 segments / 76 KB. **Quantise the ramp before segmenting, not after.**
+
+## Sequencing
+
+This is a v2 feature. It sits naturally in the rebuild's `legalize.py`, which
+already reasons about per-tone minimum feature — a hatch is simply a legal way
+to render a value *between* two palette entries, subject to the same
+constraints. The v1 architecture should not preclude it, and does not.
