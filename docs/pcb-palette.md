@@ -363,3 +363,93 @@ fills with three keepouts present — so the mechanism is sound and only the
 Same disposition as buried-copper void mode: **ship it, gate it behind a flag,
 and verify by opening the board once in the GUI and exporting the gerbers.**
 Five minutes, and it cannot be replaced by more automation.
+
+---
+
+# T9 — cuts
+
+Board outline and internal cutouts are art. Unlike T8, a cut is the **absence of
+board**, so it shows whatever is behind it — desk, enclosure, a backlight, or
+another board in a stack.
+
+## Two forms
+
+**Outline.** `Edge.Cuts` need not be rectangular. A pendant, a badge, a
+silhouette — the whole board becomes the shape.
+
+**Internal cutouts.** Windows and slots routed clean through. Combine with T8 in
+an adjacent region and you get a lit window beside an open one.
+
+## Router constraints — the ones that bite
+
+Cuts are made with a rotating bit, not a beam, and that governs everything:
+
+| constraint | typical value | consequence |
+|---|---|---|
+| standard bit diameter | 1.6–2.0 mm | |
+| **minimum internal radius** | **= bit radius, 0.8–1.0 mm** | **sharp internal corners are impossible** |
+| smaller bit available | 1.0 mm dia → 0.5 mm radius | at extra cost, ask first |
+| minimum slot width | ≈ bit diameter | a 0.5 mm slot cannot be routed |
+| external corners | sharp is fine | the bit cuts *around* them |
+
+**Internal corners are always filleted to the bit radius.** Design them that way
+or the fab will do it for you, badly. This is the most common surprise: art that
+looks crisp in KiCad comes back with 1 mm rounded inside corners.
+
+**Fine detail is not cuttable.** The interlocking pattern on the reference
+pendant is entirely ENIG-on-black, not cuts — the only cuts are the triangular
+outline and three mounting holes. That is the right division of labour: **cuts
+for silhouette, copper and mask for detail.**
+
+**Webs need width.** Material left between two cuts must not snap in
+depanelisation or handling. Treat ~1.5 mm as a floor for anything handled, more
+for a kit a student will flex.
+
+## Cost and process notes
+
+Complex outlines increase routing time and cost; internal cutouts more so.
+V-scoring is cheaper but only cuts straight lines edge to edge, so it is
+unusable for art. Panelisation tabs and mouse-bites leave witness marks on the
+outline — place them where the art can absorb them.
+
+---
+
+# Knockout: silk as background rather than foreground
+
+Worth naming because it inverts the usual assumption, and the reference boards
+use it constantly.
+
+The SparkFun carrier's pin labels are **white silk rectangles with the text
+knocked out** — the dark letters are bare mask showing through gaps in the ink,
+not dark ink.
+
+Two consequences:
+
+**It is another way to get "dark on light"** without a second ink colour. Any
+tone can host any other as a knockout, subject only to minimum feature on the
+*gap* rather than on the mark.
+
+**Minimum feature applies to the hole, not the shape.** A 0.15 mm silk gap is at
+least as hard to hold as a 0.15 mm silk line — ink bleeds inward and can close a
+fine gap. Knockout text needs *more* margin than positive text, not less.
+
+For the tracer this means polygon-with-holes must be first-class, which the
+chosen architecture already requires for letterforms like O and 8.
+
+---
+
+# Reference boards observed
+
+| board | demonstrates |
+|---|---|
+| SparkFun MicroMod carrier | black mask + white silk; constellation linework; **silk knockout** labels; faint T6 traces under mask |
+| Bolt Industries rulers | **same art, two finishes** — ENIG gold on black vs bare/OSP brown on white. Copper used as *linework*, not fill |
+| Bitcoin pyramid pendant | **custom outline as art**; dense ENIG-on-black pattern; detail in copper, silhouette in cuts |
+| Peer-to-Peer card *(not a PCB)* | target aesthetic: metallic on dark, embossed dark-on-dark background — the print analogue of T5/T6/T7 |
+| Bitcoin sticker sheet *(not a PCB)* | **visible halftone** on the two photographic images — what dithering looks like at legible scale |
+
+The Bolt pair is the most useful single reference: identical artwork, two
+finishes, showing directly that the metal tone is **brown on bare/OSP and gold
+on ENIG**. That is the T2 finish-dependence documented above, in physical form,
+and it argues for the palette file carrying a finish parameter rather than
+hard-coding gold.

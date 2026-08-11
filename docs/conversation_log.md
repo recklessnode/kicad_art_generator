@@ -787,3 +787,41 @@ segfaults with a keepout-bearing footprint, so no automated confirmation that
 the keepout knocks its hole in a filled pour. The GUI plainly works — this board
 fills with three keepouts — so the mechanism is sound and only automation is
 blocked. Ship behind a flag; verify once by hand in the GUI and export gerbers.
+
+---
+
+## 2026-08-11 10:20 UTC — Reference boards, plus T9 (cuts) and the knockout technique
+
+**Models:** Opus 5 (analysis).
+
+Five physical references supplied. Two add capability the palette did not cover.
+
+**T9 — cuts.** `Edge.Cuts` outline and internal cutouts are art. Unlike T8
+(translucent laminate) a cut is the *absence of board*, showing whatever is
+behind. The governing fact is that cuts are routed with a rotating bit, so
+**internal corners are always filleted to the bit radius — 0.8–1.0 mm
+typically** — and sharp inside corners are impossible. Minimum slot width is
+about one bit diameter, so a 0.5 mm slot cannot exist.
+
+The pendant reference makes the right division of labour obvious: its dense
+interlocking pattern is entirely ENIG-on-black, and the only cuts are the
+triangular outline and three mounting holes. **Cuts for silhouette, copper and
+mask for detail.**
+
+**Knockout.** The SparkFun carrier's pin labels are white silk rectangles with
+the text knocked *out* — the dark letters are bare mask through gaps in the ink,
+not a second ink. This inverts the usual assumption and is worth naming, because
+minimum feature then applies to the **gap** rather than the mark, and ink bleeds
+inward, so knockout text needs *more* margin than positive text. It also means
+polygon-with-holes must be first-class in the tracer, which the architecture
+already requires for letterforms like O.
+
+**The Bolt Industries ruler pair is the most useful single reference:** identical
+artwork on two boards, showing the metal tone as **brown on bare/OSP** and
+**gold on ENIG**. That is the documented T2 finish-dependence in physical form,
+and it argues for the palette file carrying a finish parameter rather than
+hard-coding gold.
+
+Also noted: the sticker sheet's two photographic images are visibly halftoned,
+which is a useful sanity check on the earlier conclusion that PCB dithering
+reads as texture rather than blending. At legible scale, it does.
