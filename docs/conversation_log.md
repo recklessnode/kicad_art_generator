@@ -117,7 +117,7 @@ anything lands in a public repo.
 | probe | question |
 |---|---|
 | code | how colour mapping actually works, and measured byte/primitive counts from a real generation run |
-| kicad10 | which `fp_*` primitives KiCad 10.0.5 supports, whether `fp_poly` takes curves, whether `kicad-cli` gained image import, whether "fixed size" is still a real constraint |
+| kicad10 | which `fp_*` primitives KiCad 10.0.0 supports, whether `fp_poly` takes curves, whether `kicad-cli` gained image import, whether "fixed size" is still a real constraint |
 | palette | the achievable tone set and the right quantisation approach |
 | geometry | contour-trace + simplify vs potrace vs rectangles, with a prototype run for real vertex counts and file sizes |
 
@@ -570,3 +570,96 @@ finish-dependent and no theoretical table should be trusted for matching. We
 have a physical reference board; the right way to fill them in is to photograph
 it under diffuse light against a colour card and sample. Until then the
 appearance column is ordinal, not colorimetric.
+
+---
+
+## 2026-08-11 08:50 UTC — Audit complete. Decision: rebuild, fabrication-first
+
+**Models:** Fable 5 (4 survey probes, 3 design proposals); Opus 5 (orchestration,
+judgement). 8 agents, 0 errors, ~741 k subagent tokens.
+
+### Correction first: KiCad here is 10.0.0, not 10.0.5
+
+`kicad-cli version` → **10.0.0** (format `20260206`). I briefed every agent with
+10.0.5 and wrote it into earlier entries; both surveys and the judge caught it
+independently. Corrected throughout above.
+
+Note the CI gate in `SatoshiStarter` pins the container `kicad/kicad:10.0.5-full`,
+so **CI runs a newer KiCad than this workstation**. Their ERC/DRC counts agreed
+exactly (3 / 209 / 5) so they are behaviourally equivalent today, but that is an
+observation, not a guarantee. The format version `20260206` is the invariant that
+actually matters.
+
+### Verdict: fabrication-first rebuild
+
+The three proposals converged ~85% — all invert the data model to
+tone → layer-mask → **one trace per physical layer**, all lift a validated
+crack-trace/Douglas-Peucker prototype, all emit modern s-expressions, all delete
+potrace / svg2mod / rsvg-convert. The fabrication-first proposal won on the
+remainder: it organises around **per-tone absolute minimum feature in mm**, which
+forces morphological legalisation as a first-class stage, registration
+compensation as set operations between layers, and **size-aware tone collapse** —
+the honest answer to complaint 3, since a 12 mm badge and a 50 mm badge are
+different fabrication problems and should get different tone sets rather than the
+same geometry scaled.
+
+### New defects the audit found that we had not
+
+- **Dimensional bug.** A requested 20 mm width emits **26.67 mm** and **13.35 mm**
+  in different modes. 26.67 = 20 × 96/72 — a pt/px unit confusion. Part of
+  complaint 3 is not "KiCad forces fixed sizes"; it is that the sizes are simply
+  wrong.
+- **65.4% of pixels dropped** on a gradient fixture (74,504 of 113,953); 2,695
+  boundary pixels dropped even on the clean bitcoin logo.
+- **Tonal inversion.** Navy `(16,24,64)` renders as white silkscreen, L\* ≈ 97,
+  across 63,772 pixels. Not merely mismapped — inverted.
+- **Dual-colour emits every shape twice** — 1,339 `fp_poly` on `F.Cu` plus 1,338
+  on `F.Mask` for the same art. A 2× on top of the trace problem.
+- **Non-deterministic output**: random `tedit`, so golden tests are impossible.
+
+### Two hard tooling constraints, both verified here
+
+**`kicad-cli` exits 0 on failure.** Reproduced directly: with a non-existent
+output directory, `fp export svg` prints `Failed to create file` *and* `Done.`
+and returns **0**. Any tooling that checks `$?` gets a false green.
+
+**`--layers` silently breaks on inner layers.** Measured:
+
+| `--layers` | exit | bytes |
+|---|---|---|
+| `In1.Cu` | 0 | **0** |
+| `F.SilkS` | 0 | 930 |
+| `In1.Cu,F.SilkS` | 0 | **0** |
+| *(omitted)* | 0 | 1106 — renders **both** |
+
+So one bad layer name poisons the whole list, and the failure is silent. But
+In1 art renders fine with no filter. The smoke-test rule is therefore: **never
+pass `--layers`, and assert the output file exists rather than trusting the exit
+code.**
+
+### Deliberately not shipping in v1
+
+- **In1 "void"/keepout mode.** `pcbnew.ZONE_FILLER.Fill()` **segfaults (exit 139,
+  2/2)** with a keepout-bearing footprint on the board, and fills cleanly without
+  it. So there is no automated way to verify a knockout in a filled pour, and it
+  cannot carry a CI gate. Ship **island mode only** (`fp_poly` on `In1.Cu`,
+  verified to reach the gerber as a real region), behind `--enable-buried`.
+  Unblocked by a five-minute manual GUI check, not by more automation.
+- **Dithering.** Correctness depends on physical dot-pitch legibility we have no
+  measurement for.
+
+### Environment facts that shape the build
+
+KiCad's bundled Python 3.11.5 has **PIL 12.1.1 and numpy 2.4.2**; **scipy,
+skimage, cv2, svgelements and cairosvg are all absent.** Morphology must
+therefore be hand-rolled and separable — measured `MaxFilter(21)` on an 1800²
+mask is **8.18 s**, so naive open+close across 7 tones × 3 sizes is minutes.
+
+### Next step is a go/no-go, not code
+
+W0 is a half-day spike: quantiser + compositor only, no emitter, run on the real
+sources, producing side-by-side renders against the current previews with ring
+count, coverage and mean ΔE. **Ronald looks at it and says yes or no before
+anything else is written.** That is the right gate — every downstream estimate
+depends on the quantiser actually being better, and that is a judgement only he
+can make.
