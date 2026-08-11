@@ -426,7 +426,7 @@ If an image is very large or detailed, reduce `--max-dimension` to keep the gene
 
 ## Conversation Log
 
-Commit-time history is tracked in [docs/conversation_log.md](/Users/prael/Documents/GitHub/kicad_art_generator/docs/conversation_log.md).
+Commit-time history is tracked in [docs/conversation_log.md](docs/conversation_log.md).
 
 ## Development
 
