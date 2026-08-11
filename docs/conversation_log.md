@@ -520,3 +520,53 @@ the geometry path is broken independently of the classifier, which is worth
 knowing before any colour work starts.
 
 So the sequence is: single-colour first as a geometry check, then colour.
+
+---
+
+## 2026-08-11 08:10 UTC — Palette specified: `docs/pcb-palette.md`
+
+**Models:** Opus 5 (analysis, spec).
+
+Wrote the palette up as a standalone reference rather than a log entry, since
+it is the target the quantiser maps onto and will be consulted repeatedly.
+
+**Seven tones**, from four binary controls per side (`F.SilkS`, `F.Mask`
+negative, `F.Cu`, `In1.Cu`). Not sixteen combinations — two constraints collapse
+the space:
+
+- **Silk requires mask beneath it.** Fabs strip ink off a mask opening; KiCad
+  names the rule *"Silkscreen clipped by solder mask"* and this board trips it
+  121 times. So silk and mask-opening are mutually exclusive.
+- **Outer copper occludes buried copper**, so `In1.Cu` only matters where there
+  is no `F.Cu`.
+
+That turns the mapping into a decision tree rather than a lookup, which is a
+simpler thing to implement correctly:
+
+```
+silk? -> T1. mask open? -> copper ? T2 : buried ? T4 : T3
+                        -> copper ? T6 : buried ? T7 : T5
+```
+
+Two findings from writing it that matter for implementation:
+
+**`In2.Cu` contributes nothing to the front.** It sits ~1.375 mm back through
+the core. `In1` shades the front, `In2` shades the back — the sides are
+symmetric and independent. Earlier entries loosely said "inner layers
+participate"; it is specifically `In1` for front-side art.
+
+**T5 is the absence of all geometry.** The background tone requires drawing
+nothing. So the quantiser should pick the most common source tone as background
+and emit no polygons for it — correct behaviour *and* the largest single
+file-size saving available, on top of the vector fix.
+
+Also recorded: buried tones blur (shadows through 0.1 mm of dielectric, so
+fields not linework), and any tone boundary defined by mask-over-copper stacks
+two tolerances at ±0.05 mm registration — so oversize copper relative to the
+mask opening and let registration error move the edge *within* copper.
+
+The sRGB values are deliberately left unpopulated. They are vendor- and
+finish-dependent and no theoretical table should be trusted for matching. We
+have a physical reference board; the right way to fill them in is to photograph
+it under diffuse light against a colour card and sample. Until then the
+appearance column is ordinal, not colorimetric.
