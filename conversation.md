@@ -99,3 +99,54 @@ fact. Folded into the implementation brief as a design input.
 
 Workflow `wf_ad1b3e5c-79d` running. Results and the decision to follow in the
 next entry.
+
+## 2026-08-11 07:0x UTC — Correction: buried inner-layer copper is a real tone
+
+The brief I wrote for the palette survey said of buried traces: *"Assess whether
+inner-layer copper is actually visible through FR4 ... Be honest if this is
+marginal."* That framing was wrong, and the owner corrected it with a physical
+sample.
+
+**Evidence.** A photograph of a finished board: black soldermask, ENIG gold
+exposed copper, white silkscreen — and a dark field carrying clearly legible
+art rendered *entirely as tonal shifts within the black*. Concentric rings,
+chevron bands and grid hatching are all readable. Multiple distinct dark tones
+are present; it is not one flat black with gold on top.
+
+**Why it works, and it is not marginal.** The governing variable is prepreg
+thickness, not FR4 translucency in general. The Satoshi Starter stackup is
+`0.035 Cu / 0.1 prepreg / 1.24 core / 0.1 prepreg / 0.035 Cu`, so **In1.Cu sits
+roughly 0.1 mm beneath the surface copper** — thin enough to shadow through a
+dark mask. On a board with a thick outer prepreg the effect would be much
+weaker. So this is a stackup-dependent capability we happen to have, rather
+than a universal property.
+
+That also means three mechanisms produce "dark", and they are different tones
+that a quantiser should treat separately:
+
+- outer-layer copper under mask
+- inner-layer copper shadowing through prepreg + mask
+- bare substrate under mask
+
+**Consequence for the redesign.** The achievable palette is materially larger
+than the eight front-side copper/mask/silk combinations I had assumed. Inner
+layers participate, which means the tool is not choosing among ~5 tones but
+something closer to a two-dimensional space of surface state x buried state.
+
+The practical limit is edge sharpness rather than availability: a buried tone
+is a diffuse shadow through 0.1 mm of dielectric, so its edges blur relative to
+a silkscreen or copper edge. Minimum feature size for a buried tone is
+therefore larger than for the surface layers, and that constraint — not
+whether the tone exists — is what should bound its use.
+
+**Process note.** Caught this while the workflow was still in its survey phase,
+before any design proposal or the Opus judgement had started. Stopped the run,
+rewrote the palette brief to treat buried tones as settled and to characterise
+rather than assess them, and resumed — the three unaffected survey agents cache
+on their unchanged prompts, so only the palette probe re-ran.
+
+Had it landed later, a wrong "buried traces are marginal" premise would have
+propagated through three design proposals and the synthesis. Worth recording as
+the general point: an assumption embedded in a brief is more expensive than an
+assumption embedded in code, because every downstream agent inherits it without
+re-deriving it.
