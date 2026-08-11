@@ -375,3 +375,82 @@ answer to "we could do better by hand".
 The emission formula, being line art with an SVG source, should go through the
 vector path that already works (`bitcoin_b`: 3 polygons, 57 vertices each,
 8.4 KB) and should never touch the rasteriser.
+
+---
+
+## 2026-08-11 07:40 UTC — Root cause of the Reckless logo failure: it is a parsing bug
+
+**Models:** Opus 5 (analysis).
+
+Located the real source: `.../Business Docs/Logo-Library/Logo-Library/Color/`,
+which holds Black / Color / White variants as `.svg`, `.eps` and Affinity
+`.afdesign` originals. `RecklessSystemsLogoColor.svg` is 19 KB.
+
+The SVG is **ideal input**: 28 paths, 9 groups, viewBox `0 0 720 720`, **zero
+gradients, zero embedded images**. Clean flat vector line art. There is no
+excuse for it converting badly, which makes the failure diagnostic rather than
+inherent.
+
+### What the source actually contains
+
+```
+28 paths total
+17 with an explicit fill  (of which 1 is fill:none)
+11 with NO fill           <- inherit; SVG default is black
+```
+
+Explicit fills, in full:
+
+| colour | uses |
+|---|---|
+| `rgb(1,190,219)` cyan | 8 |
+| `rgb(20,191,219)` cyan | 2 |
+| `rgb(240,81,54)` orange-red | 1 |
+| `none` | 1 |
+
+### Three defects, compounding
+
+**1. The preset asks the wrong question.** Dual-colour mode maps *yellow →
+copper, white → silkscreen*. **This logo contains no yellow and no white** — it
+is cyan, orange-red, and black. So the matcher finds almost nothing and
+discards the rest. That is precisely the observed preview: an empty hexagon
+with a few disconnected fragments.
+
+The tool asks *"which pixels are yellow or white?"* when the right question is
+*"what are the N dominant tones here, and where should each map?"*
+
+**2. Inherited fills are invisible.** Eleven of 28 paths declare no fill and
+inherit SVG's default black. Any extractor scanning for explicit `fill:`
+declarations misses **39% of the artwork** before classification even starts.
+
+**3. Near-duplicate colours are treated as distinct.** `rgb(1,190,219)` and
+`rgb(20,191,219)` differ by (19,1,0) — visually identical cyan, numerically two
+colours. The repo already carries a `--adjacent-color-tolerance` flag, which
+reads as a workaround bolted on after hitting exactly this, rather than a fix
+for the underlying model. Perceptual clustering in CIELAB makes the flag
+unnecessary.
+
+### The full chain, for the record
+
+```
+SVG (28 clean paths)
+  -> preset looks for yellow/white   .. logo has neither
+  -> extractor sees explicit fills only .. 11 paths invisible
+  -> two identical cyans counted separately
+  -> multi-colour mode RASTERISES the vector source anyway
+  -> survivors emitted one rectangle per pixel  -> 2.5 MB
+```
+
+Every stage is lossy, and the last two are wholly unnecessary for vector input.
+**Complaints 1 and 2 are the same bug seen from two ends.**
+
+The fix is correspondingly narrower than a rewrite: resolve inherited fills,
+cluster tones perceptually rather than matching named colours, let the operator
+assign tone → layer, and keep vector input on the vector path.
+
+### Licensing note for the public release
+
+The Bitcoin "B" came from Wikipedia. The Bitcoin logo is public domain, so it
+carries cleanly into a CERN-OHL-S release (`SatoshiStarter#13`). The Reckless
+Systems mark is the owner's own. The MFB Satoshi character is third-party and
+its usage terms should be confirmed before it ships on a public board.
