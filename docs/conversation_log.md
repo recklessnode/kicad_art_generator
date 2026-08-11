@@ -25,10 +25,25 @@ easy wins concentrate.
 | audit + redesign: orchestration, judgement | `2f01cb1`, `ba81f22`, this entry | 2026-08-11 | **Claude Opus 5** |
 | audit + redesign: survey probes, design proposals | (pending) | 2026-08-11 | **Claude Fable 5** |
 
-The April attribution is **not recorded in the repository** — those commits
-carry no trailers. It rests on the owner's recollection ("I think by like
-GPT-5.4 or something") and should be treated as approximate. This is precisely
-the gap the convention below exists to close.
+The April attribution is **not recorded in the repository**. What the history
+actually contains, checked rather than assumed:
+
+- All 16 April commits are authored by the owner's own account. None carries a
+  trailer, and no commit body anywhere in the April range mentions a model.
+- The only `Claude` strings in the entire history are the `Co-Authored-By`
+  lines on the August audit commits. Seeing those and inferring that Claude
+  wrote the tool is a trap — they post-date the code by four months.
+
+One weak forensic signal does survive. The April commits use the GitHub
+noreply address `125509978+recklessnode@users.noreply.github.com`, whereas the
+August ones use the local git identity `ronald@bynoe.us`. That means the April
+work was committed **through GitHub's API** rather than by local git — a
+web/API-driven agent rather than a CLI one. It does not name the model, but it
+narrows the class, and it is the only evidence the repository itself holds.
+
+So the attribution rests on the owner's recollection ("I think by like GPT-5.4
+or something") and should be treated as approximate. This is precisely the gap
+the convention below exists to close.
 
 **Convention going forward.** Every commit carries a `Models:` trailer naming
 each model and what it did, so provenance survives without depending on anyone
