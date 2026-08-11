@@ -208,3 +208,95 @@ propagated through three design proposals and the synthesis. Worth recording as
 the general point: **an assumption embedded in a brief is more expensive than
 an assumption embedded in code**, because every downstream agent inherits it
 without re-deriving it.
+
+---
+
+## 2026-08-11 07:10 UTC — Real output samples: both complaints diagnosed precisely
+
+**Models:** Opus 5 (analysis).
+
+The owner supplied a directory of local test output — ten `.kicad_mod` files and
+four preview PNGs, outside the repo and deliberately not committed. This is far
+better evidence than anything synthesised, and it turns both complaints from
+impressions into measurements.
+
+### Complaint 2 (huge files): every raster polygon is one source pixel
+
+| file | bytes | fp_poly | vertices | verts/poly |
+|---|---|---|---|---|
+| `bitcoin_b` | 8,443 | 3 | 171 | **57.0** |
+| `two_color_demo_1in` | 868 | 2 | 10 | 5.0 |
+| `cholla_energy_enig_v2` | 425,442 | 1,356 | 6,780 | 5.0 |
+| `reckless_svg_multicolor` | 645,610 | 2,610 | 13,050 | 5.0 |
+| `cholla_cactus_bundle` | 833,845 | 2,565 | 12,825 | 5.0 |
+| `reckless_svg_multicolor_hq` | **2,522,310** | 9,455 | 47,275 | 5.0 |
+
+**Exactly 5.0 vertices per polygon** across every raster-derived file — four
+corners plus the closing repeat, i.e. an axis-aligned rectangle. The first
+polygon in the 2.5 MB file is:
+
+```
+(xy -0.029296875 -27.5390625) (xy -0.029296875 -27.509765625)
+(xy  0.029296875 -27.509765625) (xy  0.029296875 -27.5390625)
+```
+
+That is **0.0586 × 0.0293 mm** — a single source pixel. Silkscreen minimum
+feature is around 0.15 mm, so this geometry is roughly **2.5× finer than any
+board house can print**. The tool is spending 2.5 MB storing detail that
+physically cannot be fabricated.
+
+The `hq` preset makes this worse rather than better: 9,455 rectangles against
+2,610 for the same logo. Quality presets scale *rectangle count*, not trace
+fidelity.
+
+### The good path already exists in this codebase
+
+`bitcoin_b.kicad_mod` is **3 polygons, 57 vertices each, 8.4 KB** — genuine
+traced contours. So single/dual-colour SVG handling vectorises correctly.
+
+The bug is narrower than "the tool is bad": **multi-colour mode rasterises even
+vector input.** `reckless_svg_multicolor` came from an SVG and still produced
+2,610 rectangles. The vector information is discarded on the way in.
+
+### Complaint 1 (bad colour conversion): source-dependent, not uniform
+
+Comparing the two previews:
+
+- `cholla_energy_enig_v2` renders **well** — the flower keeps its petal detail,
+  the wordmark is clean. Flat, high-contrast, few colours.
+- `reckless_svg_multicolor_hq` loses **most of the artwork**. Only the white
+  hexagon outline and a handful of disconnected gold fragments survive; the
+  interior is empty.
+
+So the classifier copes with simple flat art and collapses on anything with
+gradients, thin strokes or close shades — dropping content wholesale rather
+than mis-assigning it. That is exactly the shape of "worse than we could do by
+hand": a human has no trouble with the harder case.
+
+Note this is *not* a layer-model problem. The multi-colour output does use all
+three layers — `F.SilkS` 4,725, `F.Cu` 2,367, `F.Mask` 2,366. The tone model is
+sound; the per-pixel classification feeding it is not.
+
+### Output is in pre-KiCad-6 format
+
+```
+generated:  (module reckless_svg_multicolor_hq (layer F.Cu) (tedit 0FC7F88C)
+KiCad 10:   (footprint "PG-TSDSON-8"
+```
+
+`(module ...)` was replaced by `(footprint ...)` in **KiCad 6, released 2021**.
+KiCad 10 still reads the legacy form, so this has never failed loudly — but it
+means the tool's model of KiCad predates the current format by five years.
+Direct support for complaint 3 being an inherited assumption rather than a
+present-day constraint.
+
+### Target assets for the Satoshi Starter
+
+Named by the owner: the **Reckless Systems logo**, the **emission rate**, the
+**"Bitcoin B" logo**, and the **"Satoshi" character** from My First Bitcoin.
+These become the acceptance set — a redesign has to render all four
+convincingly, and the Reckless logo specifically is the one that currently
+fails, so it is the regression test that matters.
+
+Note the supplied directory contains outputs and previews only; the **source
+art is not in it**, and will be needed before the acceptance set can be run.
