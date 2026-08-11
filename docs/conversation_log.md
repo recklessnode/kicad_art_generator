@@ -454,3 +454,69 @@ The Bitcoin "B" came from Wikipedia. The Bitcoin logo is public domain, so it
 carries cleanly into a CERN-OHL-S release (`SatoshiStarter#13`). The Reckless
 Systems mark is the owner's own. The MFB Satoshi character is third-party and
 its usage terms should be confirmed before it ships on a public board.
+
+---
+
+## 2026-08-11 07:55 UTC — Correction, and the variant set is a controlled experiment
+
+**Models:** Opus 5 (analysis).
+
+### Correcting the previous entry
+
+The previous entry claimed `RecklessSystemsLogoColor.svg` had "17 with fill, 11
+without → 39% invisible". **Wrong.** The check tested whether the substring
+`fill` appeared in the path element, which also matches `fill-rule` — inflating
+the count.
+
+Measured properly, distinguishing `style="fill:…"` from `fill="…"`:
+
+```
+28 paths | 12 CSS fill | 0 attribute fill | 16 with neither
+```
+
+So **16 of 28 paths (57%) inherit**, not 39%. The defect is worse than
+reported. Also worth noting: the logos use the CSS `style="fill:…"` form
+exclusively and never the `fill="…"` attribute form — an extractor handling
+only one syntax would fail differently on other artwork.
+
+That error is the same class as the tool's own: matching a colour by pattern
+without resolving what the SVG actually means. Recorded rather than quietly
+fixed, because the point of this log is the mistakes.
+
+### The variant set is a near-perfect test matrix
+
+The owner has single-colour logos parallel to the colour one. Both should go
+into `RecklessArt` — but the pair is more valuable than two deliverables,
+because it isolates the inheritance defect exactly:
+
+| variant | paths | explicit fill | inherited | what it tests |
+|---|---|---|---|---|
+| `Black` | 17 | **0** | **17 (100%)** | pure inheritance — renders nothing if resolution is broken |
+| `White` | 17 | 17 | 0 | same 17 paths, all explicit — the control |
+| `Color` | 28 | 12 | 16 (57%) | mixed, multi-tone — the reported failure |
+| `WhiteColor` | 28 | **28** | 0 | same 28 paths, all explicit — the multi-tone control |
+
+Two clean A/B pairs on identical artwork:
+
+- **Black vs White** — 17 paths each, 100% inherited vs 0%. Single tone, so
+  classification is not a factor. Any difference in output is *purely*
+  inheritance resolution.
+- **Color vs WhiteColor** — 28 paths each, 57% inherited vs 0%. Same test at
+  multi-tone.
+
+If a redesign renders all four faithfully, both the inheritance bug and the
+classifier are demonstrably fixed. If `WhiteColor` works and `Color` does not,
+the fault is isolated to inheritance alone. This is a better acceptance test
+than anything that could have been constructed deliberately, and it exists
+because the brand library happens to ship the same mark four ways.
+
+### Practical note for the library
+
+The single-colour variants are also the **easy win**: one tone, one layer, and
+they should go through the vector path that already works — the `bitcoin_b`
+result (3 polygons, 57 vertices each, 8.4 KB) is the benchmark. A single-colour
+Reckless mark on silkscreen ought to land in that size class. If it does not,
+the geometry path is broken independently of the classifier, which is worth
+knowing before any colour work starts.
+
+So the sequence is: single-colour first as a geometry check, then colour.
