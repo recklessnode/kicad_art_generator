@@ -300,3 +300,78 @@ fails, so it is the regression test that matters.
 
 Note the supplied directory contains outputs and previews only; the **source
 art is not in it**, and will be needed before the acceptance set can be run.
+
+---
+
+## 2026-08-11 07:25 UTC — Requirement: one growing `RecklessArt` library, not loose files
+
+**Models:** Opus 5 (analysis).
+
+### The deliverable shape
+
+The tool currently emits standalone `.kicad_mod` files. The owner's actual
+requirement is **a single `RecklessArt` library that accumulates parts over
+time**, registered once, so placing art on any board is *Add Footprint →
+RecklessArt → pick*. Minimum effort at placement time is the design goal, not
+minimum effort at generation time.
+
+Concretely that means:
+
+- Output target is `RecklessArt.pretty/`, one `.kicad_mod` per art element —
+  not a directory of one-off files per invocation.
+- **Registered globally**, not per project, so every board gets it without
+  per-project setup. That is what makes it one-time rather than per-board work.
+- **Idempotent regeneration**: re-running a part replaces it in place rather
+  than accumulating `_v2`, `_hq`, `_final` variants. The existing local output
+  directory — which contains `cholla_cactus_bundle`, `cholla_cactus_silks` and
+  `cholla_cactus_library_test`, all near-identical at 822-834 KB — is what
+  happens without this.
+- Art parts already carry `(attr board_only exclude_from_pos_files
+  exclude_from_bom)` and `(tags kicad_art_generator)`. Both are correct and
+  should be kept.
+
+### This also solves the DRC-exclusion problem cleanly
+
+Earlier entry noted that art on `F.Cu` is real copper and will trip the
+SatoshiStarter CI rules. With a library, **membership is the exclusion
+mechanism** — `tools/pcb_rules.py` skips footprints whose library is
+`RecklessArt`, and the board's DRC gets a rule area or exclusion keyed the same
+way. No naming-convention hack, no per-part maintenance, and it cannot drift
+because a part is either in the art library or it is not.
+
+### Source assets located
+
+`.../1-ASIC Satoshi Starter/Art Assets/`:
+
+| asset | formats | note |
+|---|---|---|
+| Bitcoin Emission Formula | **`.svg`** (18 KB), `.mml`, `.odf`, 3× `.png` | authored as a LibreOffice Math formula — crisp line art, and the **only asset with a vector source** |
+| Little Satoshi | `.png` | |
+| Satoshi Miner (+ transparent) | `.png` | |
+| Satoshi Points | `.png` | |
+
+**Missing from both directories: the Reckless Systems logo source and the
+Bitcoin B source.** The Reckless logo exists only as generated output
+(`reckless_svg_multicolor*`), and `examples/bitcoin_b.svg` in this repo is a
+614-byte placeholder rather than the real mark. Both are needed before the
+acceptance set can run.
+
+### Difficulty assessment of the assets
+
+The Satoshi character is a **far better PCB candidate than the Reckless logo**:
+flat-shaded cartoon with heavy consistent black outlines and roughly five
+tones — black line, dark gold body, light yellow helmet, white eyes, orange
+shading. That is structurally the Cholla case, which the current tool already
+handles well, not the Reckless case which it fails.
+
+Worth noting for the palette work: the character's body is *literally a gold
+coin*, which maps directly onto ENIG exposed copper, and the black outlines map
+onto bare black soldermask. On the black-mask/ENIG stackup the owner is already
+using, this asset is close to purpose-built. The mapping should be
+*controllable* rather than inferred — the tool should let a human assign source
+tone → PCB layer when the automatic choice is wrong, which is the practical
+answer to "we could do better by hand".
+
+The emission formula, being line art with an SVG source, should go through the
+vector path that already works (`bitcoin_b`: 3 polygons, 57 vertices each,
+8.4 KB) and should never touch the rasteriser.
