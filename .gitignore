@@ -17,3 +17,4 @@ coupon_out/
 # MFB and Reckless Systems property; this repo is public, so the derived copies
 # stay local. Regenerate with tools/prep_assets.py.
 assets/
+!assets/normalised/bitcoin_emission_formula.svg
