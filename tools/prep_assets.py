@@ -122,18 +122,25 @@ MFB_WEB = ("Hardware Designs/1-ASIC Satoshi Starter/SatoshiStarter/"
 #   control     -- same artwork in a variant that isolates a known defect
 # licence: recorded because this repo is headed for a public GPLv3 /
 #   CERN-OHL-S release and third-party art must not travel with it silently.
+#
+#   My First Bitcoin granted WRITTEN CONSENT (2026-08-17) to place their mark on
+#   the SatoshiStarter; those boards go to MFB's educator network. That consent
+#   is for the BOARD, and it does not make the source files redistributable --
+#   they still must never be committed to this repository. assets/ stays
+#   gitignored. The originals are archived in the private SatoshiStarter repo
+#   under art-assets/, with a sha256 manifest; see its README.md.
 ASSETS = [
     dict(id="little_satoshi", src=f"{ART}/Little Satoshi.png", root="onedrive",
-         role="deliverable", key_shadow=True, licence="third-party (MFB Satoshi) -- CONFIRM TERMS"),
+         role="deliverable", key_shadow=True, licence="third-party (MFB Satoshi) -- consent for SatoshiStarter, NOT redistributable"),
     dict(id="satoshi_miner", src=f"{ART}/Satoshi Miner - Transparent.png", root="onedrive",
-         role="deliverable", key_shadow=True, licence="third-party (MFB Satoshi) -- CONFIRM TERMS"),
+         role="deliverable", key_shadow=True, licence="third-party (MFB Satoshi) -- consent for SatoshiStarter, NOT redistributable"),
     dict(id="satoshi_miner_matte", src=f"{ART}/Satoshi Miner.png", root="onedrive",
-         role="control", key_shadow=True, licence="third-party (MFB Satoshi) -- CONFIRM TERMS",
+         role="control", key_shadow=True, licence="third-party (MFB Satoshi) -- consent for SatoshiStarter, NOT redistributable",
          note="Same artwork as satoshi_miner with a baked white matte. Ground "
               "truth for the matte-detection path: its recovered alpha should "
               "match satoshi_miner's real alpha."),
     dict(id="satoshi_points", src=f"{ART}/Satoshi Points.png", root="onedrive",
-         role="deliverable", key_shadow=True, licence="third-party (MFB Satoshi) -- CONFIRM TERMS"),
+         role="deliverable", key_shadow=True, licence="third-party (MFB Satoshi) -- consent for SatoshiStarter, NOT redistributable"),
     dict(id="bitcoin_emission_formula", src=f"{ART}/Bitcoin Emission Formula.svg",
          root="onedrive", role="deliverable", flatten_text=True,
          licence="own work (LibreOffice Math export)"),
@@ -150,14 +157,14 @@ ASSETS = [
          note="28 paths, all explicit fill. A/B control against reckless_color "
               "(28 paths, 57 % inherited)."),
     dict(id="mfb_node_full", src=f"{MFB}/Node Badge_full node.svg", root="onedrive",
-         role="deliverable", licence="third-party (My First Bitcoin) -- CONFIRM TERMS",
+         role="deliverable", licence="third-party (My First Bitcoin) -- consent for SatoshiStarter, NOT redistributable",
          note="Illustrator export with an internal DTD subset; see "
               "tools/svg_entities.py for why cairosvg could not read it."),
     dict(id="mfb_node_light", src=f"{MFB}/Node Badge_light node.svg", root="onedrive",
-         role="deliverable", licence="third-party (My First Bitcoin) -- CONFIRM TERMS",
+         role="deliverable", licence="third-party (My First Bitcoin) -- consent for SatoshiStarter, NOT redistributable",
          note="Sibling of mfb_node_full."),
     dict(id="mfb_lockup_white", src=f"{MFB_WEB}/logo-mfb-white.svg", root="onedrive",
-         role="deliverable", licence="third-party (My First Bitcoin) -- CONFIRM TERMS",
+         role="deliverable", licence="third-party (My First Bitcoin) -- consent for SatoshiStarter, NOT redistributable",
          note="The official WHITE lockup from myfirstbitcoin.org, fetched "
               "2026-08-17; see PROVENANCE.txt beside it. 32 paths, one fill "
               "#F6F6F6, no strokes. MFB's identity is a white mark on a purple "
