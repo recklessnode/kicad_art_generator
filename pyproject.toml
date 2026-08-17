@@ -15,6 +15,21 @@ authors = [
 dependencies = [
   "Pillow>=10.4.0",
   "svg2mod==1.2.2",
+  # tools/emit_art.py, tools/w0_spike.py and tools/verify_art.py import numpy at
+  # module level. It was undeclared until the halftone / region-op / structural
+  # work made it a hard import of the emitter rather than an optional accelerator,
+  # at which point `pip install -e .` produced a tree whose main tool would not
+  # start. scipy is deliberately NOT here: the distance transform and the
+  # inscribed-circle search in emit_art are written against numpy alone.
+  "numpy>=1.26",
+  # The SVG rasteriser the committed library was built with. rasterise_svg()
+  # falls back to rsvg-convert and then inkscape, and the three do not produce
+  # the same raster -- one pixel of height and different edge antialiasing on
+  # mfb_node_full.svg, which is a 4.7% difference in the emitted footprint. The
+  # fallbacks stay, because a machine without cairosvg should still render; but
+  # the library is only reproducible with it, so it is named here rather than
+  # left to whatever the host happens to have.
+  "cairosvg>=2.7",
 ]
 
 [project.optional-dependencies]

@@ -419,6 +419,88 @@ def _is_filled(node) -> bool:
     return False
 
 
+# --- text extents -----------------------------------------------------------
+# The old estimate here was "roughly 0.75 em advance per character", which is a
+# rule of thumb and reads about 15% narrow for lowercase-heavy strings. That
+# under-reports the extent, and under-reporting is the dangerous direction for a
+# harness: it made a mask block that correctly framed a row of microtext look
+# like a polygon flung off on its own, and failed a good footprint.
+#
+# tools/stroke_font.py now carries the newstroke metrics MEASURED off a
+# kicad-cli render -- per-glyph advance, per-glyph ink box, and the amount
+# `justify left` slides the text as the pen gets heavier. Use them when they
+# apply, and stay deliberately conservative when they do not: an over-large box
+# can only make this harness less trigger-happy, never blind.
+
+_SF = None
+_SF_TRIED = False
+_SF_NOTE = ""
+
+
+def _stroke_font():
+    global _SF, _SF_TRIED, _SF_NOTE
+    if not _SF_TRIED:
+        _SF_TRIED = True
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import stroke_font as sf
+            _SF = sf
+        except Exception as e:                      # pragma: no cover
+            _SF_NOTE = (f"tools/stroke_font.py could not be imported ({e}); "
+                        f"text extents fall back to a conservative estimate")
+    return _SF
+
+
+def _justify_of(node) -> set[str]:
+    eff = kid(node, "effects")
+    out: set[str] = set()
+    if eff is None:
+        return out
+    for j in kids(eff, "justify"):
+        for tok in j[1:]:
+            if isinstance(tok, str):
+                out.add(tok)
+    return out
+
+
+def _text_box(s: str, h: float, t: float, just: set[str]):
+    """Ink box of `s` relative to its anchor -> ((x0,y0,x1,y1), exact).
+
+    `exact` is False whenever anything had to be assumed, which is what keeps
+    Item.approx_bbox honest instead of blanket-true.
+    """
+    if h <= 0:
+        return (0.0, 0.0, 0.0, 0.0), False
+    sf = _stroke_font()
+    if sf is not None:
+        try:
+            m = sf.measure_string(s, allow_unmeasured=False,
+                                  stroke_ratio=(t / h) if t > 0 else None)
+        except Exception:
+            m = None
+        if m is not None and m.ink_em is not None:
+            x0, y0, x1, y1 = (v * h for v in m.ink_em)
+            pen = (t or 0.0) / 2.0        # ink is centred on the centreline
+            if "left" in just:
+                return (x0 - pen, y0 - pen, x1 + pen, y1 + pen), True
+            # Only `justify left` has been measured against a render; every
+            # other justification is placed from the advance width, which is
+            # right to within the side bearings but has not been confirmed.
+            adv = m.advance_em * h
+            if "right" in just:
+                return (-adv + x0 - pen, y0 - pen, -adv + x1 + pen, y1 + pen), False
+            return (-adv / 2 - pen, y0 - pen, adv / 2 + pen, y1 + pen), False
+    # No metrics: reserve the WIDEST glyph in the font for every character, and
+    # a full ascender-to-descender band. Too big on purpose.
+    w = max(len(s), 1) * h * (getattr(sf, "MAX_ADVANCE_EM", 1.34) if sf else 1.34)
+    asc, desc = 0.69 * h, 0.85 * h
+    if "left" in just:
+        return (0.0, -asc, w, desc), False
+    if "right" in just:
+        return (-w, -asc, 0.0, desc), False
+    return (-w / 2, -asc, w / 2, desc), False
+
+
 def build_item(node) -> Item | None:
     head = node[0]
     layers = _layers_of(node)
@@ -485,12 +567,21 @@ def build_item(node) -> Item | None:
                 th = kid(font, "thickness")
                 if th is not None and len(th) > 1:
                     t = fnum(th[1], 0.0) or 0.0
-        # KiCad's stroke font runs roughly 0.75 em advance per character.
-        w_est = max(len(s), 1) * h * 0.75
-        pts = [(x, y - h / 2), (x + w_est, y - h / 2),
-               (x + w_est, y + h / 2), (x, y + h / 2)]
+        ang = fnum(at[3], 0.0) if at is not None and len(at) > 3 else 0.0
+        just = _justify_of(node)
+        box, exact = _text_box(s, h, t, just)
+        pts = []
+        for (dx, dy) in ((box[0], box[1]), (box[2], box[1]),
+                         (box[2], box[3]), (box[0], box[3])):
+            if ang:
+                # KiCad text angles are counter-clockwise as displayed and file
+                # y grows downward, so this is the transpose of the usual form.
+                a = math.radians(ang)
+                c, sn = math.cos(a), math.sin(a)
+                dx, dy = dx * c + dy * sn, -dx * sn + dy * c
+            pts.append((x + dx, y + dy))
         it = Item(head, layers, pts, 0.0, False, s, h, t)
-        it.approx_bbox = True
+        it.approx_bbox = not exact
         return it
 
     if head == "pad":
@@ -876,7 +967,12 @@ def check_size(path: Path, fp: Footprint, cfg) -> Check:
     span = max(bb[2] - bb[0], bb[3] - bb[1]) if bb else 0.0
     human = f"{n:,} B ({n/1000:.1f} kB)"
     dims = f"{bb[2]-bb[0]:.1f} x {bb[3]-bb[1]:.1f} mm" if bb else "no geometry"
-    d = [f"extent {dims} (text extents estimated)"]
+    approx = [it for it in fp.items if it.approx_bbox]
+    d = [f"extent {dims}" + (f" ({len(approx)} item(s) with ESTIMATED extents "
+                             f"-- arcs, or text this harness has no measured "
+                             f"metrics for)" if approx else "")]
+    if _SF_NOTE:
+        d.append(_SF_NOTE)
 
     if span > ASSET_MM:
         d.append(f"NOTE: longest side {span:.1f} mm exceeds the {ASSET_MM:.0f} mm "
