@@ -20,6 +20,34 @@ B.Mask        0.01 mm
 B.SilkS
 ```
 
+## What of this document you can actually run
+
+This file is both the specification and the status board. Some of what follows
+is a **conversion mode** — feed it an image and the technique comes out the other
+end — and some is still only **calibration geometry**, drawn parametrically for a
+test coupon and not driven by any picture. Every implemented technique below
+carries an **In the emitter** heading naming its flags; this table is the index.
+
+| technique | status | how you run it |
+|---|---|---|
+| T1–T7 flat tones | **conversion mode** | the default: `tools/emit_art.py --labels IMG --width-mm N --name NAME -o OUT` |
+| line-width modulation *(technique 1)* | **conversion mode** | `--fill-mode hatch`, with `--hatch-pitch` / `--hatch-angle` / `--halftone-levels` |
+| line-pitch modulation *(technique 2)* | **not implemented** | pitch is a constant, not a per-cell variable |
+| stipple, by dot size *(technique 3)* | **conversion mode** | `--fill-mode stipple`, with `--stipple-pitch` / `--halftone-levels` |
+| microprinting | **conversion mode** | `tools/microtext.py`, or `--microtext STRING --microtext-height MM --microtext-tone TONE` on an art footprint |
+| knockout | **conversion mode** | `--knockout MARK[:HOST]`, with `--knockout-floor-mult` |
+| silhouette keyline | **conversion mode** | `--silhouette-tone TONE --silhouette-mm WIDTH` |
+| **T8** translucent window | **conversion mode, but half a part** | `--window-tone TONE` emits the two mask openings only; the four copper keepouts *cannot* be footprint-borne and have to be drawn on the board |
+| **T9** cuts | **conversion mode** | `--cut-tone TONE`, with `--cut-fillet-mm` / `--cut-outer-fillet-mm` |
+| tone patches, buried wedges, ladders, registration marks | **calibration geometry only** | `tools/coupon_ladders.py`, `tools/coupon_blocks.py` — parametric, no image goes in |
+| the five-technique visual study | **not footprints at all** | `tools/technique_demo.py` writes a PNG |
+| arcs inside `fp_poly` | **measured, not emitted** | KiCad round-trips them and they are smaller; the emitter still writes straight RDP polylines |
+
+Every mode's output is expected to pass `tools/verify_art.py`. It has one known
+blind spot, named under **Knockout** below. What the implemented modes are
+allowed to promise rests on the measurements collected under **Measured, not
+assumed** at the end of this file.
+
 ## The four controllable layers
 
 Per side, art is a choice over four binary controls:
@@ -82,6 +110,15 @@ T7  fp_poly on In1.Cu
 common source tone as background and emit no geometry for it at all. That is
 both correct and the single largest file-size saving available.
 
+**And T5 has no silhouette.** A source region that quantises to T5 draws
+nothing, so it is indistinguishable from the board around it. On Tux that is
+**34.7 % of the figure** — his entire body — which dissolves into the board with
+no edge at all. Colour data cannot recover the boundary, because body and
+background are then the same tone and contiguous; the alpha channel still can.
+`tools/emit_art.py --silhouette-tone TONE --silhouette-mm WIDTH` reassigns a ring
+of the alpha edge to a contrasting tone. Measured under **Measured, not assumed**
+below.
+
 ### Precedence
 
 Not sixteen free combinations — a decision tree:
@@ -126,6 +163,11 @@ so their edges are diffuse rather than crisp. Fine detail will not read.
 Treat them as *fields and broad shapes*, not linework — which is exactly how
 the reference board uses them.
 
+**And buried tones cannot be previewed from a footprint at all.** `kicad-cli fp
+export svg` emits nothing whatsoever for `In1.Cu` — measured, see the end of this
+file — so T4 and T7 are invisible in every footprint-level SVG render. Confirming
+one means plotting from a board or opening the part in the GUI.
+
 **Tone boundaries that depend on two layers stack two tolerances.** The T2/T6
 edge is defined by a mask edge landing on a copper edge, and mask registration
 is typically ±0.05 mm. Do not rely on that boundary for fine detail; oversize
@@ -142,6 +184,14 @@ each tone.
 
 Until that is done, treat the appearance column as ordinal — T1 lightest, T5
 darkest — rather than as colorimetry.
+
+**And this is a black-mask set.** Every tone above, including the estimated sRGB
+anchors the quantiser actually uses in `tools/w0_spike.py`, describes the
+black-mask / ENIG stackup. A green board is not this palette re-lit — it needs
+its own sampled anchors. The green-mask figures in `docs/images/` are a
+**render-time colour choice, not a calibration**, so a coverage percentage read
+off them describes geometry rather than appearance. Both gaps close under the
+same issue, **#1 — sample real tones from a reference board**.
 
 ---
 
@@ -210,12 +260,86 @@ The fix is adaptive segmentation: split only where the width changes by a
 meaningful step. Eight tonal levels rather than 25 takes the same square to
 roughly 500 segments / 76 KB. **Quantise the ramp before segmenting, not after.**
 
-## Sequencing
+## In the emitter
 
-This is a v2 feature. It sits naturally in the rebuild's `legalize.py`, which
-already reasons about per-tone minimum feature — a hatch is simply a legal way
-to render a value *between* two palette entries, subject to the same
-constraints. The v1 architecture should not preclude it, and does not.
+`tools/emit_art.py --fill-mode hatch|stipple` makes this a conversion mode. A
+source *gradient* becomes a duty-cycle field between the T5 background (duty 0,
+which draws nothing) and the tone solid (duty 1), so a picture is no longer
+limited to seven flat tones. `--hatch-pitch` (0.40 mm), `--hatch-angle` (45°, off
+both raster axes so the mark grid cannot beat against the pixel grid),
+`--stipple-pitch` (0.50 mm) and `--halftone-levels` (8) drive it. It needs the
+source *image*: a `.npy` of labels has already thrown the shading away.
+
+Which of the three techniques above that is, precisely:
+
+- `hatch` is **technique 1, line-width modulation** — the pitch is constant and
+  the mark width tracks duty.
+- `stipple` is **technique 3**, dot size on a fixed grid.
+- **Technique 2, pitch modulation, is not implemented.** Pitch is a constant, not
+  a per-cell variable.
+
+Marks are emitted as **filled quads, not `fp_line` strokes**, which revises the
+cost argument above: a stroke has round caps that bulge half a width past the
+clip, and one line can hold only one width anyway. So the unit of cost is a
+polygon, and the prediction above is worth checking against it.
+
+**It holds.** `output/w1_halftone/grad_hatch` is the same case that section
+projects — a 25 mm square, 0.4 mm pitch, quantised to 8 levels — and comes out at
+**677 filled marks / 105.5 kB** against the projected ~500 segments / 76 KB. Same
+order, about a third above the estimate, and two tones deep rather than one. The
+rule the estimate rests on is the one that matters and it survives: quantise the
+ramp *before* segmenting.
+
+On real art the ratio is milder, because most of a picture is flat. The 25 mm
+Satoshi asset: solid 85,458 B / 454 polygons, stipple 94,865 B, hatch 138,013 B /
+818 polygons. A smooth ramp is the opposite extreme — `grad_solid` is 2,113 B
+because a gradient quantises to almost nothing at all, and `grad_hatch` is
+108,061 B because the hatch is the only thing rendering it.
+
+### The floor sets the duty range, and it is narrow
+
+The layer's minimum feature applies to the mark **and** to the dam between marks,
+so duty is confined to `floor/pitch … 1 − floor/pitch`, with 0 and 1 exact at
+either end. Measured from `output/w1_halftone/satoshi_hatch.json` at the default
+0.4 mm pitch:
+
+| tone | layers | floor | achievable duty |
+|---|---|---|---|
+| T1 | `F.SilkS` | 0.15 mm | 0.377 – 0.623 |
+| T2 | `F.Cu` + `F.Mask` | 0.10 mm | 0.253 – 0.748 |
+| T3 | `F.Mask` | 0.10 mm | 0.253 – 0.748 |
+
+That 0.748 **is** this document's "roughly 60–70 % duty" cap on mask hatch,
+measured: the cap is pitch-dependent, and at 0.4 mm pitch it is 75 %. Silk, with
+the coarser floor, gets only the middle quarter of its ramp. A pitch below twice
+the floor can hold no duty at all — the emitter says so and reports every
+clamped pixel rather than clamping quietly. Stipple is worse, exactly as the
+ranking above predicts: dots on a square grid put duty at the *square* of the
+linear ratio, measured 0.091 – 0.487 for T1 and 0.041 – 0.637 for T2 at the
+0.5 mm default pitch.
+
+### It declines the ramps this document calls worthless
+
+The ramp table above rates T5 → T6 "too subtle on black mask to be worth it".
+The emitter enforces that with a 20 L\* threshold and names what it skipped:
+measured against the black-mask anchors, **T6 is 7.9 L\* from the T5 background
+and T7 is 3.4 L\***, so both are drawn **solid** and the geometry a halftone
+would have cost is never spent. T1 (84.1 L\*), T2 (60.9) and T3 (65.0) are
+patterned.
+
+All layers of a tone's recipe carry the **same** marks, so T2 stays copper and
+mask coincident — hatching only the mask would turn the space between marks into
+T6 rather than into background.
+
+## Sequencing — superseded
+
+Written as a v2 feature, to sit in the rebuild's `legalize.py`. It arrived
+earlier than that, in `tools/emit_art.py`, for the reason the original note
+gives: the duty ladder needs precisely what `legalize.py` was going to provide —
+per-tone minimum feature — and the emitter already had it. The framing survives
+the schedule slipping forward, and whatever replaces `emit_art.py` must keep it:
+a hatch is a legal way to render a value *between* two palette entries, under the
+same constraints as either end.
 
 ---
 
@@ -274,6 +398,63 @@ configuration* — so art has to be excluded from those constraints. The
 `RecklessArt` library-membership exclusion already planned covers this; it does
 not need separate machinery.
 
+## In the emitter
+
+`tools/microtext.py --text STRING --height MM --tone TONE` places microtext, as
+a single run, along a `--path`, or filling a `--region` with repeated rows.
+`tools/emit_art.py` carries the same flags prefixed `--microtext-*`, so a
+microprint can go onto an art footprint in one pass.
+
+It enforces the two rules above rather than restating them. Silk below the cap
+height its own floor implies is **refused**, not quietly promoted; so are `T3`
+(the letterforms would *be* the mask opening) and the buried tones, which this
+document says are fields and broad shapes, not linework. `T2` puts copper
+letterforms inside **one** block opening and `T6` puts copper under mask with no
+opening at all — the two forms named above, and the only two offered.
+
+### The counters are measurable, so they are measured
+
+`tools/stroke_font.py` reads KiCad's newstroke font off a `kicad-cli fp export
+svg` render, which writes the stroke centrelines as plain polylines. For every
+printable ASCII glyph it records the advance, the ink box, and the inscribed
+radius *D* of the narrowest enclosed void, all in em. Because the ink is centred
+on the centreline, a counter's clear width is then exactly
+
+    clear = 2·D·cap − stroke
+
+which turns "closed letterforms fail before straight strokes" into a number. At
+the 1:6.7 stroke ratio the crossover is at **D = 0.15 em**: a glyph with a
+tighter counter than that fails before its own strokes do. Measured, `'e'` is
+0.147, `'@'` 0.214, `'8'` 0.214, `'B'` 0.238 — so `e` is the first thing in
+`coupon_ladders.SPECIMEN` to close, which is why that specimen was chosen.
+
+For the full specimen on copper, against this document's 0.1 mm floor:
+
+| limit | smallest cap height |
+|---|---|
+| stroke ≥ 0.1 mm | 0.667 mm |
+| **counter ≥ 0.1 mm** | **0.690 mm** ← binds |
+| legibility (0.6 mm) | 0.600 mm |
+
+**0.695 mm**, rounded up to a 5 µm step, passes every check in
+`tools/verify_art.py`. That lands inside the 0.6–0.8 mm reliable zone above
+without having been aimed at it. At a standard fab's 0.127 mm the same string
+needs 0.88 mm — the per-vendor point above, in millimetres.
+
+### KiCad slides the text as the pen gets heavier
+
+Measured against KiCad 10.0.0: `justify left` justifies the text *box*, which
+includes the pen, so the letterforms sit **0.658 × stroke to the right and
+0.052 × stroke above** the anchor. Pure translation — the string's own extent
+does not change — and linear to 6e-9 em over a 90× range of stroke ratio.
+
+At a 0.105 mm stroke that x shift is 0.069 mm, **larger than the ±0.05 mm mask
+registration tolerance the block opening exists to absorb**. A block opening
+placed from the anchor rather than from the letterforms therefore spends the
+entire registration budget before the fab has done anything. `stroke_font.py`
+corrects for it and `verify_art.py` now uses the same measured extents instead
+of its old 0.75 em-per-character estimate.
+
 ## Cost
 
 Negligible, and worth contrasting with hatching. `fp_text` uses KiCad's built-in
@@ -325,6 +506,23 @@ openings.
 working keepouts inside the inductor footprint, with `copperpour not_allowed`,
 `tracks not_allowed`, `vias not_allowed`. Nothing new is required.
 
+### The keepout has to be on the BOARD, not in the footprint
+
+Measured against KiCad 10.0.0: a copper keepout **carried by a footprint is
+silently ignored by the zone filler**. Not an error, not a warning — the plotted
+copper gerber comes back byte-identical to the same board with no keepout at
+all. Board-level rule areas work as documented; footprint-level ones do not.
+
+This is the constraint that shapes the whole tone. A T8 window **cannot be a
+self-contained part**. A footprint can carry its own two mask openings, and
+that is all; the four copper exclusions have to be drawn on the board that
+places it, or the In1 pour floods the window and it never lights.
+
+`tools/emit_art.py --window-tone` therefore emits the mask apertures on F.Mask
+and B.Mask, marks the outline to trace on `Dwgs.User`, and says so on every run.
+The `Dwgs.User` outline is documentation, not fabrication: nothing on it becomes
+copper, mask or a keepout by itself.
+
 ## Why this tone is different
 
 **It needs six aligned layer operations** — four copper exclusions and two mask
@@ -359,6 +557,12 @@ footprint on the board, so there is no automated way to confirm a keepout
 actually knocks its hole in a filled pour. The GUI plainly works — this board
 fills with three keepouts present — so the mechanism is sound and only the
 *automated* check is unavailable.
+
+> Read that alongside the finding above: the case that segfaults the scripted
+> filler is the *footprint*-borne keepout, which is also the case that produces
+> no hole even when the filler survives. The keepout that matters — the
+> board-level rule area — fills and plots normally, and the emitter never asks
+> for the other kind.
 
 Same disposition as buried-copper void mode: **ship it, gate it behind a flag,
 and verify by opening the board once in the GUI and exporting the gerbers.**
@@ -412,6 +616,24 @@ V-scoring is cheaper but only cuts straight lines edge to edge, so it is
 unusable for art. Panelisation tabs and mouse-bites leave witness marks on the
 outline — place them where the art can absorb them.
 
+## In the emitter
+
+`tools/emit_art.py --cut-tone TONE` turns that tone's regions into `Edge.Cuts`
+loops, and fillets the inside corners to `--cut-fillet-mm` (default 0.8) rather
+than leaving them for the fab to round without telling anyone. Outside corners
+are left sharp, because the bit cuts around those.
+
+Two things it will refuse or shout about, both of which have already bitten a
+hand-built part in `library/`:
+
+- **A footprint cutout is unconditional.** Footprint `Edge.Cuts` merges into the
+  same gerber layer as the board outline, so every board that places the
+  footprint gets the hole. There is no per-instance switch.
+- **Copper must be on the KEEP side.** `copper_edge_clearance` is a distance
+  rule and is indifferent to side, so copper printed on the slug clears the
+  rule, passes DRC, and is routed away with the waste. The emitter decides the
+  side explicitly and fails rather than warns.
+
 ---
 
 # Knockout: silk as background rather than foreground
@@ -435,6 +657,144 @@ fine gap. Knockout text needs *more* margin than positive text, not less.
 
 For the tracer this means polygon-with-holes must be first-class, which the
 chosen architecture already requires for letterforms like O and 8.
+
+## In the emitter
+
+`tools/emit_art.py --knockout MARK[:HOST]` (repeatable) stops drawing tone MARK
+in its own layers; the gap it leaves in HOST *is* the mark. HOST defaults to
+whichever drawing tone the mark mostly borders. Verified on a synthetic silk
+field, `output/regionops/knockfield_*`: `--knockout T2:T1` takes 9 `fp_poly` down
+to 1, suppresses T2's `F.Cu` + `F.Mask` entirely, and measures host adjacency at
+100 %.
+
+### "More margin than positive text" is now a number: 2×
+
+`--knockout-floor-mult`, default **2.0**. This document states the direction and
+gives no number, so it was derived rather than picked. Ink bleed *b* runs outward
+from every inked edge. A positive mark of width *w* has ink inside both of its
+edges and so images at *w* + 2*b* — fatter, but present. A gap has ink outside
+both edges, images at *w* − 2*b*, and is **gone at w = 2b**. The positive floor
+*F* is where a mark stops being reliable, which puts *b* ≈ *F*/2 — and for mask
+*F*/2 = 0.05 mm is exactly the ±0.05 mm registration tolerance quoted above. So a
+gap must be drawn at *F* + 2(*F*/2) = **2F**. Demonstrated on the same synthetic
+field: a 0.200 mm silk gap passes the 0.15 mm positive floor and fails the
+0.30 mm knockout floor.
+
+Gap width is measured as the **largest inscribed circle** — not minimum width,
+which condemns every acute corner, and not area, which waves through a long thin
+slot. It is accurate to roughly ±4 % of the floor being tested and the direction
+of the error is not guaranteed, so a gap within a few percent of the floor may be
+called either way. The audit runs on **every hole in every tone**, flag or no
+flag, because a hole *is* a knockout; `--no-gap-audit` and `--gap-audit-max`
+bound it.
+
+### The acceptance harness cannot see knockouts
+
+`tools/verify_art.py` measures clearance *between* separate features. After
+keyhole bridging, a knockout is a hole *inside* a single polygon, so there are no
+pairs left to compare.
+
+Measured, and it is the uncomfortable case: of the nine footprints in
+`output/regionops/`, `knockfield_knockout.kicad_mod` is the **one that PASSES**
+everything — min-feature and clearance both clean — and it is also the one
+carrying **two silk gaps below the 0.30 mm knockout floor, the narrowest
+0.094 mm across**. The emitter's own gap audit is currently the only thing that
+catches those. Do not read a harness PASS as clearance on a knockout.
+
+---
+
+# Measured, not assumed
+
+Findings from running the tools rather than reasoning about them, against the
+installed **KiCad 10.0.0** (file format `20260206`) and the stackup at the top of
+this file. Each one is a limit on what the emitter is allowed to promise, and
+each is stated with the evidence that produced it. Dates and sessions are in
+`docs/conversation_log.md`.
+
+## A footprint cannot carry a copper keepout
+
+A copper keepout carried by a **footprint is silently ignored by the KiCad 10
+zone filler** — not an error, not a warning. The plotted copper gerber comes back
+**byte-identical to the same board with no keepout at all**. Board-level rule
+areas work as documented.
+
+Stated in full under T8 above, because it is what stops a translucent window
+being a self-contained part. It is also why `tools/texture_board.py` is
+board-in / board-out and reasons in board coordinates throughout, rather than
+generating a footprint.
+
+## Buried tones cannot be previewed from a footprint
+
+`kicad-cli fp export svg` **emits nothing at all for `In1.Cu`**. Found while
+rendering the Tux comparison figures: the front layers plot, the buried layer
+produces no output whatsoever, and the failure is silent. So **T4 and T7 cannot
+be shown in any footprint-level SVG preview** — the composites in `docs/images/`
+render T1/T2/T3/T5/T6 honestly and the two buried tones not at all. Noted rather
+than worked around; confirming a buried tone means plotting it from a board, or
+opening the footprint in the GUI.
+
+## Arcs survive the round trip, and are 2.2–4× smaller
+
+Arcs inside `fp_poly` round-trip to gerber as real **G02/G03** arc commands, and
+for curved geometry they come out **2.2–4× smaller** than the RDP-simplified
+polyline approximating the same curve.
+
+This answers a question the April audit asked and could not settle — whether
+`fp_poly` takes curves — in the affirmative, and all the way through to the film
+rather than only into the file.
+
+The emitter does **not** use them yet: `tools/emit_art.py` traces marching-squares
+contours, simplifies with RDP, and writes straight segments only. So this is the
+largest known unclaimed file-size win for curved art, recorded here rather than
+left to be re-derived.
+
+## KiCad does not snap, merge or heal abutting polygons
+
+Two polygons on the same layer that share a boundary are left exactly as
+written — **no snapping, no merging, no healing**. Exact coincidence gives a
+**true zero gap**, and whatever the emitter writes is what reaches the film.
+
+Two consequences the emitter now depends on. Adjacent tone regions can be made to
+abut with neither seam nor overlap: `tools/verify_art.py` measures 19 `F.Cu` pairs
+at a **0.000 mm** gap in `output/regionops/baseline.kicad_mod`, features touching
+exactly rather than nearly. And symmetrically, a 0.01 mm sliver written by
+accident is fabricated as a 0.01 mm sliver — nothing upstream will tidy it away.
+It is why the halftone clip contours are deliberately **not** RDP-simplified:
+adjacent duty levels share a marching-squares boundary exactly, and simplifying
+each independently would open a 0 – 0.05 mm slot on every level boundary in the
+picture.
+
+## A region that maps to T5 loses its silhouette entirely
+
+**T5 is the board.** It draws nothing, so a source region quantising to T5 cannot
+be told from the background. Measured on Tux at default settings: **34.7 % of the
+figure** — his whole body — has no edge at all. Colour data cannot recover the
+boundary, since body and background are one contiguous tone; alpha can, which is
+what `--silhouette-tone` uses.
+
+Which tone the keyline goes in matters, and was measured on the green-mask renders
+in `docs/images/`:
+
+| render | tones | note |
+|---|---|---|
+| `tux_green_plain` | 3 — mask 59.9, silk 22.8, gold 17.2 | no keyline: the body has no edge |
+| `tux_green_keyline_fr4` | 4 — mask 59.7, silk 21.3, gold 15.3, FR4 3.5 | **works** — a genuine fourth tone, tan against green |
+| `tux_green_keyline_gold` | 3 — mask 59.6, silk 21.3, gold 18.8 | only grows the gold already there; beak and feet are T2 |
+
+The first version of that keyline was specified in **pixels**, which was wrong:
+it shrank as the art scaled up. It is millimetres now, so the keyline is the same
+physical width at every output size, and the emitter warns rather than clamps when
+the requested width is under the tone's own floor.
+
+## The tone anchors are a BLACK-mask set
+
+Every tone in this document, and every sRGB anchor the quantiser uses in
+`tools/w0_spike.py`, describes the **black-mask / ENIG** stackup. A green set is
+**uncalibrated**: the green-mask figures are a render-time colour choice, not a
+measurement, so coverage percentages read off them describe geometry rather than
+appearance. Tracked as issue **#1 — calibrate the palette: sample real tones from
+a reference board**, which is also the issue that turns the black-mask anchors
+themselves from estimates into measurements.
 
 ---
 
