@@ -114,6 +114,8 @@ ART = "Hardware Designs/1-ASIC Satoshi Starter/Art Assets"
 LOGO = "Business Docs/Logo-Library/Logo-Library"
 MFB = ("Hardware Designs/1-ASIC Satoshi Starter/SatoshiStarter/ZIP - MFB Logos/"
        "Brand-Book-main/Badges/Nodes")
+MFB_WEB = ("Hardware Designs/1-ASIC Satoshi Starter/SatoshiStarter/"
+           "ZIP - MFB Logos/from-website")
 
 # role:
 #   deliverable -- art we intend to convert
@@ -154,6 +156,16 @@ ASSETS = [
     dict(id="mfb_node_light", src=f"{MFB}/Node Badge_light node.svg", root="onedrive",
          role="deliverable", licence="third-party (My First Bitcoin) -- CONFIRM TERMS",
          note="Sibling of mfb_node_full."),
+    dict(id="mfb_lockup_white", src=f"{MFB_WEB}/logo-mfb-white.svg", root="onedrive",
+         role="deliverable", licence="third-party (My First Bitcoin) -- CONFIRM TERMS",
+         note="The official WHITE lockup from myfirstbitcoin.org, fetched "
+              "2026-08-17; see PROVENANCE.txt beside it. 32 paths, one fill "
+              "#F6F6F6, no strokes. MFB's identity is a white mark on a purple "
+              "field, so on the purple baseline this quantises to a single tone: "
+              "T1 silk for the mark, T5 bare mask for the field, and the "
+              "Bitcoin B is a KNOCKOUT hole in the silk band. The Brand-Book "
+              "zip has no white vector lockup -- only raster PNG and an "
+              "orange/near-black .ai."),
     dict(id="bitcoin_b", src="examples/bitcoin_b.svg", root="repo",
          role="deliverable", licence="public domain (Bitcoin logo)"),
 ]

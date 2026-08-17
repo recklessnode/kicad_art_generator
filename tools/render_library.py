@@ -44,6 +44,7 @@ LIBRARY = [
     ("mfb_node_light", "mfb_node_light.svg",           [12, 20], []),
     ("reckless_color", "reckless_color.svg",           [12, 20], []),
     ("reckless_mono",  "reckless_black.svg",           [12, 20], ["--ink-tone", "T1"]),
+    ("mfb_lockup",     "mfb_lockup_white.svg",         [20, 30], ["--min-area-mm2", "auto"]),
     ("bitcoin_b",      "bitcoin_b.svg",                [10, 16], []),
     ("btc_emission",   "bitcoin_emission_formula.svg", [25, 35], ["--ink-tone", "T1"]),
 ]
