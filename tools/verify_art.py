@@ -16,13 +16,35 @@ Checks, one reported line each:
   4. layers       -- every layer used is one docs/pcb-palette.md names
   5. self-isect   -- self-intersecting polygons fill unpredictably
   6. min-feature  -- narrowest feature per layer vs the fabrication floors
-  7. clearance    -- gaps between features (mask dams); beyond the original
-                     spec, but docs/pcb-palette.md makes 0.1 mm dams a hard
-                     constraint, so a harness that ignores gaps misses real
-                     dropout. Disable with --no-clearance.
+  7. clearance    -- gaps between features (mask dams, copper spacing); beyond
+                     the original spec, but docs/pcb-palette.md makes 0.1 mm
+                     dams a hard constraint and every FabProfile.min_copper_mm
+                     is a spacing limit as well as a width one, so a harness
+                     that ignores gaps misses real dropout. --no-clearance.
 
 Exit status: 0 = every file passed, 1 = at least one FAIL, 2 = harness error.
-WARNs do not fail the run unless --strict is given.
+WARNs do not fail the run unless --strict is given. A feature or gap under a
+floor that came from a NAMED FABRICATOR is a FAIL, not a WARN: the palette
+doc's numbers are house guidance, but a vendor's published limit is what that
+process images, and art under it is missing from the delivered board.
+
+TEXT IS EXPANDED, NOT SUMMARISED
+--------------------------------
+Checks 6 and 7 used to be blind to fp_text in two different ways, and a
+microprinted part passed 7/7 while its narrowest copper-to-copper gap was 29%
+of its own fabricator's floor:
+
+  * check_min_feature reported it.thickness -- the attribute the emitter had
+    written into the file being checked. Nothing was measured, so no text item
+    could ever contradict the tool that produced it.
+  * check_clearance collected fp_line, fp_poly and fp_rect. An fp_text was not
+    in the list, so copper spacing between letterforms was unreachable, and
+    the layer that held nothing else printed a PASS over zero pairs.
+
+Both now go through expand_text(), which places the newstroke centrelines from
+tools/stroke_font.GLYPH_PATHS. Where kicad-cli is available the expansion is
+cross-checked against the plot KiCad itself produces, so the letterforms being
+measured are demonstrably the letterforms that will be imaged.
 
 Fabrication floors and legal layers are read from docs/pcb-palette.md at
 startup, not hardcoded here -- the doc is the authority. Where the doc gives no
@@ -35,6 +57,7 @@ and a check that cannot run is never reported as a pass.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -43,8 +66,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+_TOOLS = Path(__file__).resolve().parent
+if str(_TOOLS) not in sys.path:
+    sys.path.insert(0, str(_TOOLS))
+
+# The vendor processes. This module keeps its own copy of the palette-doc
+# parsing on purpose -- see load_palette() -- but the fabrication profiles are
+# NOT duplicated: a second table of vendor limits is a second thing to go
+# stale, and the whole point of the fab tag is that the emitter and this
+# harness resolve one number from one place.
+import fab_profiles                                       # noqa: E402
 
 # --------------------------------------------------------------------------
 # Levels. Ordered so max() picks the worst.
@@ -371,6 +405,14 @@ class Item:
     thickness: float = 0.0
     approx_bbox: bool = False   # True when extents are estimated (text)
     has_curves: bool = False    # poly contained arc/bezier pts we could not read
+    # Text placement, kept so the letterforms can be EXPANDED rather than
+    # summarised by a bounding box. See expand_text().
+    at: tuple[float, float] = (0.0, 0.0)
+    angle: float = 0.0
+    justify: frozenset = frozenset()
+    font_flags: tuple = ()      # ('bold',) / ('italic',) -- unmodelled shapes
+    hidden: bool = False        # KiCad does not plot it, so the fab never sees it
+    _ink: "TextInk | None" = None
 
     def bbox(self):
         b = bbox_of(self.pts)
@@ -386,6 +428,7 @@ class Footprint:
     generator: str
     items: list[Item]
     raw_layer: str = ""
+    tags: str = ""
 
 
 def _layers_of(node) -> list[str]:
@@ -501,6 +544,270 @@ def _text_box(s: str, h: float, t: float, just: set[str]):
     return (-w / 2, -asc, w / 2, desc), False
 
 
+# --- text EXPANSION ---------------------------------------------------------
+# The bounding box above answers "where is this text". It cannot answer "how
+# close does this ink get to other ink", and copper spacing is exactly that
+# question. FabProfile.min_copper_mm is minimum trace width AND SPACING, and
+# only the width half was ever modelled here -- by reading the (thickness ...)
+# attribute back out of the file under test, which measures nothing at all.
+# Meanwhile the gap check collected fp_line, fp_poly and fp_rect, so an fp_text
+# could not participate in it even in principle. A 1712-character microprinted
+# part therefore passed every check while its narrowest copper-to-copper gap
+# was 29% of its own fabricator's floor.
+#
+# So the letterforms get expanded. tools/stroke_font.GLYPH_PATHS carries the
+# newstroke centrelines measured off kicad-cli, and string_chains() places them
+# with the advance, pen-shift and justification model validated against the
+# same renderer. Everything below turns that into footprint coordinates.
+
+@dataclass
+class TextInk:
+    """Expanded letterforms of one text item, in footprint mm."""
+    chains: list[list[tuple[float, float]]] = field(default_factory=list)
+    width: float = 0.0                  # pen width, mm -- the ink is this wide
+    counters: dict[str, float] = field(default_factory=dict)  # char -> em
+    why: str = ""                       # why it could NOT be expanded
+
+    @property
+    def ok(self) -> bool:
+        return not self.why
+
+    @property
+    def n_seg(self) -> int:
+        return sum(max(0, len(c) - 1) for c in self.chains)
+
+
+def _draw_angle(ang: float) -> float:
+    """The angle KiCad actually PLOTS text at.
+
+    KiCad refuses to draw footprint text upside down: an item whose angle lands
+    in (90, 270] is plotted rotated a further 180 degrees. Measured, not read
+    off the source -- rendering 'Hxy8e j' at 0/60/89/90/91/120/179/180/181/240/
+    269/270/271/300/-30/-90/-120 degrees and matching each plot against both
+    candidates puts the switch between 90 (no flip) and 91 (flip), and between
+    270 (flip) and 271 (no flip). Ignoring it puts a rotated string 180 degrees
+    away from its own letterforms, which is a wrong answer, not a rough one.
+    """
+    a = ang % 360.0
+    return ang + 180.0 if 90.0 < a <= 270.0 else ang
+
+
+def expand_text(it: Item) -> TextInk:
+    """Stroke centrelines of a text item in footprint coordinates.
+
+    Never guesses. Anything this cannot model -- an unmeasured character, a
+    bold or italic face whose letterforms are not the ones in the table, a
+    wrapped fp_text_box -- comes back with `why` set, and every caller must
+    report that as NOT MEASURED rather than treating the item as absent. An
+    item silently treated as absent is precisely how the gap check managed to
+    pass a part it had never looked at.
+    """
+    if it._ink is not None:
+        return it._ink
+    sf = _stroke_font()
+    ink = TextInk(width=it.thickness)
+    if it.hidden or not it.text.strip(" "):
+        # Not an inability -- an absence. Hidden text is never plotted, and an
+        # empty or all-space string draws nothing whatever its size and pen, so
+        # neither has geometry to measure or to keep clear of. Checked BEFORE
+        # the size and thickness tests below: an empty (property "Reference" "")
+        # carries no thickness, and calling that "could not be measured" is a
+        # loud unknown about a thing that is not there.
+        it._ink = ink
+        return ink
+    if sf is None:
+        ink.why = f"tools/stroke_font.py could not be imported ({_SF_NOTE})"
+    elif not hasattr(sf, "string_chains"):
+        ink.why = ("tools/stroke_font.py has no GLYPH_PATHS table, so there are "
+                   "no letterforms to place (an older copy of the module?)")
+    elif it.kind == "fp_text_box":
+        ink.why = ("fp_text_box wraps its own text; the line breaks KiCad picks "
+                   "are not modelled here")
+    elif it.font_flags:
+        ink.why = (f"font is {'+'.join(it.font_flags)}; GLYPH_PATHS holds the "
+                   f"regular face only, and a different face is different "
+                   f"letterforms")
+    elif it.char_h <= 0:
+        ink.why = "text has no font size"
+    elif it.thickness <= 0:
+        ink.why = "text has no font thickness, so its ink has no width"
+    elif "\n" in it.text or "\r" in it.text:
+        ink.why = "multi-line text; line placement is not modelled here"
+    else:
+        missing = sorted({c for c in it.text if c not in sf.GLYPH_PATHS})
+        if missing:
+            ink.why = (f"characters with no measured letterform: "
+                       f"{''.join(missing)!r}")
+    if ink.why:
+        it._ink = ink
+        return ink
+
+    local = sf.string_chains(it.text, it.char_h, it.thickness, it.justify)
+    ang = _draw_angle(it.angle)
+    x0, y0 = it.at
+    if ang:
+        # KiCad text angles are counter-clockwise as displayed and file y grows
+        # downward, so this is the transpose of the usual rotation -- the same
+        # convention build_item() uses for the bounding box.
+        a = math.radians(ang)
+        c, s = math.cos(a), math.sin(a)
+        ink.chains = [[(x * c + y * s + x0, -x * s + y * c + y0) for (x, y) in ch]
+                      for ch in local]
+    else:
+        ink.chains = [[(x + x0, y + y0) for (x, y) in ch] for ch in local]
+
+    for ch in set(it.text):
+        g = sf.GLYPHS.get(ch)
+        if g and g[2] is not None:
+            ink.counters[ch] = g[2]
+    it._ink = ink
+    return ink
+
+
+# --- what kicad-cli actually plotted ----------------------------------------
+
+_SVG_PATH_RE = re.compile(r'<path\s+d="([^"]*)"')
+_SVG_TEXTG_RE = re.compile(r'<g class="stroked-text">(.*?)</g>', re.S)
+_SVG_SW_RE = re.compile(r"stroke-width:\s*([0-9.eE+-]+)")
+
+
+def svg_text_segments(svg: str) -> list[tuple[float, float, float, float]] | None:
+    """Every stroke-font segment kicad-cli drew, as (x0,y0,x1,y1) bounding
+    boxes in the SVG's own frame (mm, but translated by the plot origin).
+
+    KiCad tags stroke-font strings with <g class="stroked-text">, which is what
+    separates glyph strokes from ordinary graphics -- geometry cannot, since
+    the stem of an 'H' is just a line.
+
+    None means the plot could not be read, which is a different answer from []
+    ("the plot contains no stroke text") and must not be allowed to masquerade
+    as a disagreement with the model.
+    """
+    out = []
+    for body in _SVG_TEXTG_RE.findall(svg):
+        for d in _SVG_PATH_RE.findall(body):
+            nums = []
+            for tok in d.replace("\n", " ").split():
+                if tok[:1].isalpha():
+                    if tok[0] not in ("M", "L"):
+                        return None         # not the polyline form we can read
+                    tok = tok[1:]
+                    if not tok:
+                        continue
+                try:
+                    nums.append(float(tok))
+                    continue
+                except ValueError:
+                    return None
+            pts = [(nums[i], nums[i + 1]) for i in range(0, len(nums) - 1, 2)]
+            for i in range(len(pts) - 1):
+                (ax, ay), (bx, by) = pts[i], pts[i + 1]
+                out.append((min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)))
+    return out
+
+
+def svg_text_pen_widths(svg: str) -> list[float]:
+    """The stroke-width in force for each stroke-text group KiCad emitted.
+
+    This is the number that decides how wide the ink really is. Comparing it to
+    the (thickness ...) in the file is the difference between measuring the
+    plot and quoting the request back.
+    """
+    out = []
+    for m in _SVG_TEXTG_RE.finditer(svg):
+        before = svg[:m.start()]
+        sw = _SVG_SW_RE.findall(before)
+        if sw:
+            try:
+                out.append(float(sw[-1]))
+            except ValueError:
+                pass
+    return out
+
+
+def cross_check_expansion(fp: "Footprint", svg: str) -> str:
+    """Compare the expanded letterforms against the ones kicad-cli plotted.
+
+    Alignment is by bounding-box corner, because `fp export svg` translates the
+    plot to the origin and the offset is not recorded in the file. That makes
+    this a check of SHAPE and COUNT, not of absolute position -- which is the
+    honest description of what it proves, and it is still the thing that would
+    catch a wrong advance, a wrong justification model or a missing glyph.
+    """
+    got = svg_text_segments(svg)
+    if got is None:
+        return ("expansion NOT cross-checked: this kicad-cli writes stroke text "
+                "in a form this reader does not handle")
+    mine: list[tuple[float, float, float, float]] = []
+    unmeasured = 0
+    for it in fp.items:
+        if it.kind not in ("fp_text", "fp_text_box", "property") or it.hidden:
+            continue
+        ink = expand_text(it)
+        if not ink.ok:
+            unmeasured += 1
+            continue
+        for ch in ink.chains:
+            for i in range(len(ch) - 1):
+                (ax, ay), (bx, by) = ch[i], ch[i + 1]
+                mine.append((min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)))
+    if not got and not mine:
+        return ""
+    if unmeasured:
+        return (f"expansion NOT cross-checked: {unmeasured} text item(s) could "
+                f"not be expanded, so the plot and the model are not comparable")
+    if len(got) != len(mine):
+        return (f"EXPANSION DISAGREES WITH KICAD: kicad-cli plotted {len(got)} "
+                f"stroke segment(s), the expansion produced {len(mine)}. Treat "
+                f"every width and gap below as unreliable; "
+                f"tests/test_verify_art.py::"
+                f"test_every_baked_glyph_still_matches_this_kicad re-measures "
+                f"the whole table against this renderer and will say which "
+                f"glyphs moved")
+    dx = min(g[0] for g in got) - min(m[0] for m in mine)
+    dy = min(g[1] for g in got) - min(m[1] for m in mine)
+    Q = 0.001
+    buckets: dict[tuple, list] = {}
+    for m in mine:
+        k = (int(round((m[0] + dx) / Q)), int(round((m[1] + dy) / Q)),
+             int(round((m[2] + dx) / Q)), int(round((m[3] + dy) / Q)))
+        buckets.setdefault(k, []).append((m[0] + dx, m[1] + dy,
+                                          m[2] + dx, m[3] + dy))
+    worst, unmatched = 0.0, 0
+    for g in got:
+        k0 = (int(round(g[0] / Q)), int(round(g[1] / Q)),
+              int(round(g[2] / Q)), int(round(g[3] / Q)))
+        best = None
+        # The exact bucket answers for anything agreeing to better than half a
+        # quantum, which is every segment when the model is right. Widening to
+        # the 3^4 neighbourhood costs 81x and is only needed for a value that
+        # happens to straddle a bucket edge, so it is the fallback, not the path.
+        for c in buckets.get(k0, ()):
+            e = max(abs(c[i] - g[i]) for i in range(4))
+            if best is None or e < best:
+                best = e
+        if best is None or best > Q / 2:
+            for d0 in (-1, 0, 1):
+                for d1 in (-1, 0, 1):
+                    for d2 in (-1, 0, 1):
+                        for d3 in (-1, 0, 1):
+                            for c in buckets.get((k0[0] + d0, k0[1] + d1,
+                                                  k0[2] + d2, k0[3] + d3), ()):
+                                e = max(abs(c[i] - g[i]) for i in range(4))
+                                if best is None or e < best:
+                                    best = e
+        if best is None:
+            unmatched += 1
+        else:
+            worst = max(worst, best)
+    if unmatched:
+        return (f"EXPANSION DISAGREES WITH KICAD: {unmatched} of {len(got)} "
+                f"plotted segment(s) have no counterpart in the expansion")
+    return (f"expansion cross-checked against kicad-cli's own plot: "
+            f"{len(got)}/{len(got)} segments matched, worst deviation "
+            f"{worst:.6f} mm")
+
+
 def build_item(node) -> Item | None:
     head = node[0]
     layers = _layers_of(node)
@@ -549,11 +856,20 @@ def build_item(node) -> Item | None:
 
     if head in ("fp_text", "fp_text_box", "property"):
         s = ""
-        for tok in node[1:]:
-            if isinstance(tok, str) and tok not in (
-                    "user", "reference", "value", "hide", "unlocked", "knockout"):
-                s = tok
-                break
+        if head == "property":
+            # (property "Name" "Value" ...): the SECOND string is the text that
+            # gets drawn. Taking the first one made every property render as
+            # its own field name -- harmless while text was only a bounding
+            # box, wrong the moment the letterforms are expanded.
+            if len(node) > 2 and isinstance(node[2], str):
+                s = node[2]
+        else:
+            for tok in node[1:]:
+                if isinstance(tok, str) and tok not in (
+                        "user", "reference", "value", "hide", "unlocked",
+                        "knockout"):
+                    s = tok
+                    break
         at = kid(node, "at")
         x, y = node_xy(at)
         h = t = 0.0
@@ -567,6 +883,18 @@ def build_item(node) -> Item | None:
                 th = kid(font, "thickness")
                 if th is not None and len(th) > 1:
                     t = fnum(th[1], 0.0) or 0.0
+        flags = []
+        if eff is not None:
+            font = kid(eff, "font")
+            if font is not None:
+                for tok in font[1:]:
+                    if isinstance(tok, str) and tok in ("bold", "italic"):
+                        flags.append(tok)
+                for f in ("bold", "italic"):
+                    fk = kid(font, f)
+                    if fk is not None and (len(fk) < 2 or fk[1] in ("yes", "true")):
+                        if f not in flags:
+                            flags.append(f)
         ang = fnum(at[3], 0.0) if at is not None and len(at) > 3 else 0.0
         just = _justify_of(node)
         box, exact = _text_box(s, h, t, just)
@@ -582,6 +910,16 @@ def build_item(node) -> Item | None:
             pts.append((x + dx, y + dy))
         it = Item(head, layers, pts, 0.0, False, s, h, t)
         it.approx_bbox = not exact
+        it.at = (x, y)
+        it.angle = ang
+        it.justify = frozenset(just)
+        it.font_flags = tuple(flags)
+        # Hidden text is not plotted, so it is not on the board and cannot be
+        # too fine, too close or too small. Both spellings: the bare `hide`
+        # token of the old format and the `(hide yes)` of the new one.
+        hk = kid(node, "hide")
+        it.hidden = (any(t == "hide" for t in node[1:] if isinstance(t, str))
+                     or (hk is not None and (len(hk) < 2 or hk[1] in ("yes", "true"))))
         return it
 
     if head == "pad":
@@ -612,6 +950,7 @@ def load_footprint(path: Path) -> Footprint:
     v = kid(fp, "version")
     g = kid(fp, "generator")
     lay = kid(fp, "layer")
+    tg = kid(fp, "tags")
 
     items = []
     for c in fp:
@@ -626,6 +965,7 @@ def load_footprint(path: Path) -> Footprint:
         generator=(g[1] if g and len(g) > 1 else "?"),
         items=items,
         raw_layer=(lay[1] if lay and len(lay) > 1 else ""),
+        tags=(tg[1] if tg and len(tg) > 1 and isinstance(tg[1], str) else ""),
     )
 
 
@@ -640,6 +980,12 @@ class Palette:
     buried_provisional: bool
     source: str
     notes: list[str]
+    # Floor classes whose number came from a NAMED FABRICATOR rather than from
+    # the palette doc. The distinction decides severity: the doc's numbers are
+    # house guidance and a part under them is a risk to review, but a vendor's
+    # published limit is what the vendor will actually image, and a part under
+    # THAT is not a risk -- it is a part that cannot be built. See _severity().
+    hard: set[str] = field(default_factory=set)
 
 
 def load_palette(doc: Path | None, side: str) -> Palette:
@@ -953,6 +1299,15 @@ def check_kicad_load(path: Path, cfg) -> Check:
                              "fp export svg exited 0 but rendered nothing", details)
             details.append(f"fp export svg: rendered {svgs[0].name} "
                            f"({svgs[0].stat().st_size:,} B)")
+            # Keep the plot. It is the only independent statement of what KiCad
+            # will actually draw, and the min-feature check uses it to confirm
+            # that the letterforms it expanded are the letterforms KiCad emits.
+            # The temp dir dies with this `with`, so read it now or not at all.
+            try:
+                cfg.render_svg = svgs[0].read_text(encoding="utf-8",
+                                                   errors="replace")
+            except OSError:
+                cfg.render_svg = None
         else:
             details.append("fp export svg: skipped (--no-render)")
 
@@ -1451,11 +1806,52 @@ def _floor_for(layer: str, pal: Palette) -> tuple[float | None, str, bool]:
     return pal.floors[c], c, (c == "buried" and pal.buried_provisional)
 
 
+def _severity(cls: str, pal: Palette) -> str:
+    """How bad is a feature under the floor of class `cls`?
+
+    The palette doc's numbers are house guidance, and art under them is a risk
+    worth reviewing -- WARN. A number taken from a NAMED FABRICATOR is not
+    guidance: it is the finest thing that process images, published by the
+    people who will run it. Art under that is not risky, it is missing from the
+    delivered board, and calling that a warning is how an unbuildable part gets
+    shipped past a green run. So a fab-sourced floor FAILs.
+    """
+    return FAIL if cls in pal.hard else WARN
+
+
+def _ink_min_width(ink: TextInk) -> float | None:
+    """Narrowest ink dimension of an expanded text item, mm. None if no ink.
+
+    Walked over the expanded geometry rather than read off the file, and the
+    answer being the pen width is a theorem, not a coincidence: the ink is the
+    union of capsules of diameter `w` swept along the centrelines this function
+    iterates, no capsule is anywhere narrower than `w`, and a union is never
+    narrower than its narrowest member. A stroke shorter than `w` images as a
+    disc of diameter `w`, which is the same number a third time.
+
+    None matters. A string of spaces expands to no segments at all, and an item
+    that contributes NO ink must not be quietly folded into a pass -- it has to
+    surface as "there was nothing here to measure".
+    """
+    best = None
+    for ch in ink.chains:
+        for _ in range(len(ch) - 1):
+            if best is None or ink.width < best:
+                best = ink.width
+    return best
+
+
 def check_min_feature(fp: Footprint, cfg) -> Check:
     pal = cfg.palette
     # narrowest[layer] = (width, description)
     narrowest: dict[str, tuple[float, str]] = {}
+    # Mask geometry is an OPENING and the mask floor is a DAM. Held apart on
+    # purpose -- see the report below.
+    openings: dict[str, tuple[float, str]] = {}
+    unmeasured: dict[str, list[str]] = {}
+    no_ink: list[str] = []
     concave_caveat = False
+    n_text = n_chain = n_seg = 0
 
     def note(layer, w, desc):
         if w is None or w <= 0:
@@ -1464,53 +1860,168 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
         if cur is None or w < cur[0]:
             narrowest[layer] = (w, desc)
 
+    def note_opening(layer, w, desc):
+        if w is None or w <= 0:
+            return
+        cur = openings.get(layer)
+        if cur is None or w < cur[0]:
+            openings[layer] = (w, desc)
+
+    def cannot(layer, why):
+        # Only meaningful where a floor exists. F.Fab and the User layers are
+        # not fabricated, so "the narrowest feature is unknown" there is a
+        # sentence about nothing and would bury the real ones.
+        if _floor_for(layer, pal)[0] is None:
+            return
+        unmeasured.setdefault(layer, []).append(why)
+
     for i, it in enumerate(fp.items):
         for layer in it.layers:
             if layer == "Edge.Cuts":
                 continue  # handled separately: stroke width is not the feature
+            # On a mask layer the drawn shape is the HOLE, not the material, so
+            # its width is an aperture and the only mask number in hand is a
+            # dam. Routed to note_opening() and never compared to it.
+            put = note_opening if layer_class(layer) == "mask" else note
             if it.kind == "fp_line":
-                note(layer, it.width, f"fp_line #{i} stroke")
+                put(layer, it.width, f"fp_line #{i} stroke")
             elif it.kind in ("fp_poly", "fp_rect"):
                 if it.filled:
                     w = min_width(it.pts)
                     if len(it.pts) > 4:
                         concave_caveat = True
-                    note(layer, w, f"{it.kind} #{i} min width")
+                    put(layer, w, f"{it.kind} #{i} min width")
                 else:
-                    note(layer, it.width, f"{it.kind} #{i} stroke")
+                    put(layer, it.width, f"{it.kind} #{i} stroke")
             elif it.kind == "fp_circle":
-                note(layer, it.width if not it.filled else 2 * it.char_h,
-                     f"fp_circle #{i}")
+                put(layer, it.width if not it.filled else 2 * it.char_h,
+                    f"fp_circle #{i}")
             elif it.kind == "fp_arc":
-                note(layer, it.width, f"fp_arc #{i} stroke")
+                put(layer, it.width, f"fp_arc #{i} stroke")
             elif it.kind in ("fp_text", "fp_text_box", "property"):
-                note(layer, it.thickness, f"{it.kind} #{i} glyph stroke "
-                                          f"({it.text[:18]!r})")
+                if it.hidden:
+                    continue        # never plotted, so never fabricated
+                # EXPAND, then measure. Echoing it.thickness here WAS the
+                # defect: it hands back the attribute the emitter wrote, so a
+                # text item could never disagree with the file that made it.
+                ink = expand_text(it)
+                if not ink.ok:
+                    cannot(layer, f"{it.kind} #{i} {it.text[:18]!r}: {ink.why}")
+                    continue
+                w = _ink_min_width(ink)
+                if w is None:
+                    # Measured, and the answer is "none". An empty or all-space
+                    # string draws nothing, so there is no feature here to be
+                    # too fine -- said out loud so it cannot be confused with
+                    # the NOT MEASURED case below, but not a finding.
+                    no_ink.append(f"  {layer:<10} {it.kind} #{i} "
+                                  f"{it.text[:18]!r} draws no ink at all "
+                                  f"(nothing to measure)")
+                    continue
+                put(layer, w, f"{it.kind} #{i} expanded letterforms "
+                              f"({ink.n_seg} strokes, {it.text[:14]!r})")
+
+    for it in fp.items:
+        if it.kind in ("fp_text", "fp_text_box", "property") and not it.hidden:
+            ink = expand_text(it)
+            if ink.ok and ink.chains:
+                n_text += 1
+                n_chain += len(ink.chains)
+                n_seg += ink.n_seg
 
     details, problems = [], []
     level = PASS
 
+    if n_text:
+        details.append(f"  text       {n_text} item(s) EXPANDED into {n_chain} "
+                       f"stroke path(s) / {n_seg} segments and measured; the "
+                       f"file's (thickness ...) is not taken on trust")
+        svg = getattr(cfg, "render_svg", None)
+        if svg:
+            asked = sorted({round(it.thickness, 6) for it in fp.items
+                            if it.kind in ("fp_text", "fp_text_box", "property")
+                            and it.thickness > 0})
+            plotted = sorted({round(p, 6) for p in svg_text_pen_widths(svg)})
+            if plotted and plotted != asked:
+                level = worst(level, _severity("copper", pal))
+                problems.append(
+                    f"PEN WIDTH DISAGREES: the file asks for "
+                    f"{', '.join(f'{v:.4f}' for v in asked)} mm of stroke but "
+                    f"kicad-cli plots {', '.join(f'{v:.4f}' for v in plotted)} "
+                    f"mm. The board gets KiCad's number, not the file's")
+            elif plotted:
+                details.append(f"  text       kicad-cli plots it at "
+                               f"{', '.join(f'{v:.4f}' for v in plotted)} mm, "
+                               f"which is what the file asks for")
+            xnote = cross_check_expansion(fp, svg)
+            if xnote.startswith("EXPANSION DISAGREES"):
+                level = worst(level, FAIL)
+                problems.append(xnote)
+            elif xnote:
+                details.append("  text       " + xnote)
+        else:
+            details.append("  text       no plot to compare against "
+                           "(--no-render, or no kicad-cli), so the letterforms "
+                           "are modelled but NOT confirmed against KiCad")
+
     for layer in sorted(narrowest):
         w, desc = narrowest[layer]
         floor, cls, prov = _floor_for(layer, pal)
-        tag = f"  {layer:<10} narrowest {w:.3f} mm  [{desc}]"
+        tag = f"  {layer:<10} narrowest {w:.4f} mm  [{desc}]"
         if floor is None:
             details.append(tag + "  (no fabrication floor for this layer)")
             continue
-        mark = f"{floor:.3f} mm{' PROVISIONAL' if prov else ''}"
+        mark = f"{floor:.4f} mm{' PROVISIONAL' if prov else ''}"
         if w < floor - 1e-9:
-            level = worst(level, WARN)
-            problems.append(f"BELOW FLOOR: {layer} {w:.3f} mm < {mark} ({cls}) "
+            level = worst(level, _severity(cls, pal))
+            problems.append(f"BELOW FLOOR: {layer} {w:.4f} mm < {mark} ({cls}) "
                             f"-- {desc}; this may vanish at fab")
         else:
             details.append(tag + f"  (floor {mark})")
+
+    for layer in sorted(openings):
+        w, desc = openings[layer]
+        dam = pal.floors["mask"]
+        details.append(
+            f"  {layer:<10} narrowest OPENING {w:.4f} mm  [{desc}]  -- NOT "
+            f"JUDGED against a floor: the {dam:.4f} mm mask number is a DAM "
+            f"limit, the web of mask left BETWEEN two openings. That is a gap, "
+            f"and the clearance check applies it. Holding an aperture width up "
+            f"against it answers a different question. No profile in "
+            f"tools/fab_profiles.py publishes a minimum mask OPENING, so there "
+            f"is no floor here to compare with")
+        if w < dam - 1e-9:
+            # Not a floor violation -- there is no floor. But the dam limit is
+            # the finest mask feature the process publishes ANYWHERE, so an
+            # opening below it is outside everything the fab has stated, and
+            # "unstated" must not read the same as "fine". Reported at SKIP,
+            # which is this harness's word for "nothing confirmed this".
+            level = worst(level, SKIP)
+            problems.append(
+                f"OPENING OUTSIDE THE PUBLISHED ENVELOPE: {layer} narrowest "
+                f"opening {w:.4f} mm is finer than the {dam:.4f} mm mask dam, "
+                f"which is the finest mask feature this process publishes at "
+                f"all. That is NOT a floor violation -- no fabricator states a "
+                f"minimum opening -- but nothing here can say this images "
+                f"either. Ask them before ordering")
+
+    details += no_ink
+    for layer in sorted(unmeasured):
+        why = unmeasured[layer]
+        level = worst(level, SKIP)
+        problems.append(f"NOT MEASURED: {layer} has {len(why)} item(s) whose "
+                        f"geometry could not be derived, so the narrowest "
+                        f"feature on this layer is UNKNOWN -- which is not the "
+                        f"same as clean: " + "; ".join(why[:3])
+                        + (f" (+{len(why)-3} more)" if len(why) > 3 else ""))
 
     # Text height is a legibility floor separate from stroke width. Aggregated
     # per layer: a ladder of small labels would otherwise bury everything else.
     small_text: dict[str, list] = {}
     for i, it in enumerate(fp.items):
-        if it.kind not in ("fp_text", "fp_text_box", "property") or it.char_h <= 0:
-            continue
+        if (it.kind not in ("fp_text", "fp_text_box", "property")
+                or it.char_h <= 0 or it.hidden):
+            continue        # hidden text is not plotted, so it is not illegible
         for layer in it.layers:
             c = layer_class(layer)
             lim = CHAR_H_SILK if c == "silk" else (CHAR_H_COPPER if c == "copper"
@@ -1527,6 +2038,7 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
                         f"{smallest:.2f} mm -- e.g. {sample[:24]!r}")
 
     # Edge.Cuts: the feature is the routed slot width and the corner radius.
+    edge_judged = 0
     edge_items = [it for it in fp.items if "Edge.Cuts" in it.layers]
     if edge_items:
         loops = closed_loops([it for it in edge_items if it.kind == "fp_line"])
@@ -1538,6 +2050,7 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
                            "width NOT checked (open outline?)")
             level = worst(level, WARN)
         for k, loop in enumerate(loops):
+            edge_judged += 1
             w = min_width(loop)
             if w < pal.floors["edge"] - 1e-9:
                 level = worst(level, WARN)
@@ -1564,8 +2077,18 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
                        f"is PROVISIONAL -- docs/pcb-palette.md gives no number and "
                        f"cal_buried exists to measure it. Override --floor-buried.")
 
-    head = "all features above floor" if level == PASS else \
-           f"{len(problems)} fabrication risk(s)"
+    # A check that judged nothing must not report as one that judged everything.
+    # `openings` and Edge.Cuts loops are reported, not compared, so they do not
+    # count as a floor having been exercised.
+    judged = len(narrowest) + edge_judged
+    if level != PASS:
+        head = f"{len(problems)} fabrication risk(s)"
+    elif judged:
+        head = f"all features above floor ({judged} layer(s) judged)"
+    else:
+        level = SKIP
+        head = ("NO FLOOR WAS EXERCISED -- no layer here has a feature width to "
+                "compare against a limit")
     return Check("min-feature", level, head, details + problems)
 
 
@@ -1589,113 +2112,435 @@ def _sharp_corners(loop) -> int:
 
 # --- 7. clearance / mask dams ----------------------------------------------
 
+# How precisely the expanded letterforms are known, in mm. GLYPH_PATHS is
+# stored to 1e-6 em and the advances to 1e-5 em, and the advances accumulate
+# along a string, so a placed stroke sits within about a tenth of a micron of
+# where KiCad puts it -- measured, on the largest part in this repo: 14,461 of
+# 14,461 plotted segments matched to a worst deviation of 0.000071 mm.
+#
+# A gap that misses a floor by LESS than this is not a finding, it is the model
+# reading its own rounding. Without it a coupon whose silk gap is exactly
+# 0.150000 mm by construction reports 0.149999 mm and a violation of 1.2
+# NANOMETRES, which is how a real finding gets lost in a list of noise.
+TEXT_MODEL_EPS_MM = 1e-4
+
+
+@dataclass
+class Feat:
+    """One thing on a layer that other things have to keep away from."""
+    label: str
+    edges: list                      # edges_bb_of(...) output
+    width: float                     # stroke width; 0 for a filled outline
+    bb: tuple                        # bbox ALREADY inflated by width/2
+    from_text: bool = False          # expanded letterform, not drawn geometry
+
+
+CIRCLE_SEGMENTS = 64
+
+
+def _circle_pts(cx, cy, r, n=CIRCLE_SEGMENTS):
+    """A CIRCUMSCRIBED polygon, deliberately.
+
+    An inscribed polygon sits inside the real circle, which would make the ink
+    smaller and every gap around it LARGER than it is. Erring in that direction
+    hides violations; erring the other way at worst reports one that is not
+    quite there, so the polygon is pushed out to touch the circle at its edge
+    midpoints instead of at its vertices.
+    """
+    rr = r / math.cos(math.pi / n)
+    return [(cx + rr * math.cos(2 * math.pi * k / n),
+             cy + rr * math.sin(2 * math.pi * k / n)) for k in range(n)]
+
+
+def clearance_features(fp: Footprint, cfg):
+    """Everything on every layer that the gap check can compare, plus a list of
+    everything it CANNOT -- because silently dropping an item is exactly how an
+    fp_text ended up outside this check for the whole life of the tool.
+    """
+    from collections import defaultdict
+    by_layer = defaultdict(list)
+    excluded = defaultdict(list)
+    expanded = [0, 0]                # text items, stroke paths
+
+    def add(layer, label, pts, width, closed, from_text=False):
+        b = bbox_of(pts)
+        if b is None:
+            return
+        if width:
+            b = bbox_inflate(b, width / 2.0)
+        by_layer[layer].append(Feat(label, edges_bb_of(pts, closed), width, b,
+                                    from_text))
+
+    for i, it in enumerate(fp.items):
+        for l in it.layers:
+            if layer_class(l) not in ("silk", "mask", "copper", "buried"):
+                continue
+            if it.kind == "fp_line":
+                add(l, f"fp_line #{i}", it.pts, it.width, False)
+            elif it.kind in ("fp_poly", "fp_rect"):
+                add(l, f"{it.kind} #{i}", it.pts, it.width, True)
+            elif it.kind == "fp_circle":
+                # Item stashes the radius in char_h; pts are the bbox corners.
+                cx = (it.pts[0][0] + it.pts[2][0]) / 2.0
+                cy = (it.pts[0][1] + it.pts[2][1]) / 2.0
+                add(l, f"fp_circle #{i}", _circle_pts(cx, cy, it.char_h),
+                    0.0 if it.filled else it.width, True)
+            elif it.kind in ("fp_text", "fp_text_box", "property"):
+                if it.hidden:
+                    continue        # never plotted, so never fabricated
+                ink = expand_text(it)
+                if not ink.ok:
+                    excluded[l].append(f"{it.kind} #{i} {it.text[:14]!r}: "
+                                       f"{ink.why}")
+                    continue
+                if not ink.chains:
+                    continue                      # whitespace: genuinely no ink
+                expanded[0] += 1
+                # One feature per stroke PATH, not per string and not per
+                # character. Per string would hide the gap between an 'r' and
+                # the 't' beside it; per character would hide the gap between
+                # the stem of an 'i' and its own tittle, which is 109 of the
+                # sub-floor pairs in the part that prompted all this. Paths of
+                # one glyph that genuinely touch come back with a gap of zero
+                # and are dropped below as one feature, which is what they are.
+                for k, ch in enumerate(ink.chains):
+                    expanded[1] += 1
+                    add(l, f"{it.kind} #{i} stroke {k} ({it.text[:10]!r})",
+                        ch, ink.width, False, from_text=True)
+            else:
+                excluded[l].append(f"{it.kind} #{i}: this shape is not modelled "
+                                   f"by the gap check")
+    return by_layer, excluded, expanded
+
+
+def _candidate_pairs(feats: list[Feat], reach: float, max_span=16):
+    """Index pairs whose (already pen-inflated) bboxes come within `reach`.
+
+    A uniform grid, not the x-sweep this used to be. Microprinted text turns
+    one fp_text into thousands of tiny features stacked in rows at similar x,
+    and an x-sweep compares every glyph against every glyph of every row --
+    quadratic in the number of ROWS for no benefit. The grid keeps the work
+    proportional to the number of actual neighbours.
+
+    A feature far larger than the cell (a background polygon) would be inserted
+    into thousands of cells, so anything spanning more than `max_span` cells is
+    held out and compared against everything. There are never many of those.
+    """
+    n = len(feats)
+    if n < 2:
+        return
+    sizes = sorted(max(f.bb[2] - f.bb[0], f.bb[3] - f.bb[1]) for f in feats)
+    cell = max(sizes[n // 2], reach * 2.0, 1e-6)
+
+    from collections import defaultdict
+    grid = defaultdict(list)
+    bigset = set()
+    for i, f in enumerate(feats):
+        gx0, gy0 = int(math.floor(f.bb[0] / cell)), int(math.floor(f.bb[1] / cell))
+        gx1, gy1 = int(math.floor(f.bb[2] / cell)), int(math.floor(f.bb[3] / cell))
+        if (gx1 - gx0 + 1) * (gy1 - gy0 + 1) > max_span:
+            bigset.add(i)
+            continue
+        for gx in range(gx0, gx1 + 1):
+            for gy in range(gy0, gy1 + 1):
+                grid[(gx, gy)].append(i)
+
+    for i, f in enumerate(feats):
+        if i in bigset:
+            continue
+        seen = set()
+        gx0 = int(math.floor((f.bb[0] - reach) / cell))
+        gy0 = int(math.floor((f.bb[1] - reach) / cell))
+        gx1 = int(math.floor((f.bb[2] + reach) / cell))
+        gy1 = int(math.floor((f.bb[3] + reach) / cell))
+        for gx in range(gx0, gx1 + 1):
+            for gy in range(gy0, gy1 + 1):
+                for j in grid.get((gx, gy), ()):
+                    if j > i and j not in seen:
+                        seen.add(j)
+                        yield i, j
+    # Anything too big for the grid is compared against everything, once.
+    for i in sorted(bigset):
+        for j in range(n):
+            if j == i or (j in bigset and j < i):
+                continue
+            yield (i, j) if i < j else (j, i)
+
+
+GAP_MARGIN_REACH = 2.0
+GAP_MARGIN_BUDGET = 2_000_000
+
+
+def _narrowest_separated_gap(feats: list, reach: float, budget: int):
+    """The narrowest real gap on a layer, looking PAST the floor. -> (mm, desc).
+
+    The judging pass only searches out to the floor, because that is all a
+    verdict needs. The consequence is that a part which comfortably clears its
+    floor produces no measured number at all, and the check can only say "all
+    gaps >= floor" -- the same sentence it would print for a part sitting
+    exactly ON the floor with nothing to spare. Those are very different parts
+    and the report should not render them identically.
+
+    So this walks the same geometry with a wider search radius purely to put a
+    number and a margin on the report. It CANNOT change a verdict: it is called
+    only where the judging pass already reached one, it compares nothing to a
+    floor, and it has its own budget so that a part large enough to make the
+    wider search expensive gives up and reports nothing rather than slowing the
+    run or timing out. (None, "") means "not measured", never "no gap".
+    """
+    best, desc, ops = None, "", 0
+    r2 = reach * reach
+    for a, b in _candidate_pairs(feats, reach):
+        fa, fb = feats[a], feats[b]
+        ba, bb = fa.bb, fb.bb
+        dx = max(0.0, ba[0] - bb[2], bb[0] - ba[2])
+        dy = max(0.0, ba[1] - bb[3], bb[1] - ba[3])
+        if dx * dx + dy * dy >= r2:
+            continue
+        ops += len(fa.edges) * len(fb.edges)
+        if ops > budget:
+            return None, ""
+        g = _feature_gap(fa.edges, fb.edges, fa.width, fb.width,
+                         reach + (fa.width + fb.width) / 2.0)
+        if g is None or g <= 1e-9:
+            continue          # touching: one feature, not a gap
+        if best is None or g < best:
+            best, desc = g, f"{fa.label} vs {fb.label}"
+    return best, desc
+
+
 def check_clearance(fp: Footprint, cfg) -> Check:
     """Gaps between separate features on the same layer.
 
     docs/pcb-palette.md: mask left between adjacent openings must stay above
     ~0.1 mm 'or it washes away in processing', collapsing a hatch into one flat
     opening. Same logic bounds silk gaps (knockout: 'ink bleeds inward and can
-    close a fine gap').
+    close a fine gap'). On copper the number is the same one the width check
+    uses: FabProfile.min_copper_mm is minimum trace width AND SPACING, and only
+    the width half of that sentence used to be implemented.
+
+    Text participates. It has to: a microprinted string is thousands of copper
+    features a tenth of a millimetre apart, and it was the only kind of item
+    this check could not see.
     """
     if not cfg.clearance:
         return Check("clearance", SKIP, "skipped (--no-clearance)")
 
-    from collections import defaultdict
-    by_layer = defaultdict(list)
-    for i, it in enumerate(fp.items):
-        if it.kind not in ("fp_line", "fp_poly", "fp_rect"):
-            continue
-        b = it.bbox()
-        if not b:
-            continue
-        for l in it.layers:
-            if layer_class(l) in ("silk", "mask", "copper", "buried"):
-                by_layer[l].append((i, it, b))
+    by_layer, excluded, expanded = clearance_features(fp, cfg)
 
     details, problems = [], []
     level = PASS
     n_skipped = 0
+    n_tested_layers = 0
+    n_untested_layers = 0
+    total_pairs = 0
+
+    if expanded[0]:
+        details.append(f"  text       {expanded[0]} text item(s) expanded into "
+                       f"{expanded[1]} stroke path(s), each one a feature in "
+                       f"the comparison below")
 
     for layer in sorted(by_layer):
-        items = by_layer[layer]
+        feats = by_layer[layer]
         floor, cls, prov = _floor_for(layer, cfg.palette)
         if floor is None:
             continue
-        if len(items) > cfg.max_clearance_items:
+        n = len(feats)
+        n_possible = n * (n - 1) // 2
+        if n_possible == 0:
+            # THE VACUOUS PASS. One feature forms no pairs, so the floor was
+            # never applied to anything -- and "all gaps >= 0.200 mm" over zero
+            # gaps reads exactly like a check that ran. It did not.
+            n_untested_layers += 1
+            details.append(f"  {layer:<10} {n} feature(s) -> 0 pairs. NOT "
+                           f"TESTED: a gap needs two features, so the "
+                           f"{floor:.4f} mm {cls} limit was not applied to "
+                           f"anything on this layer")
+            continue
+        if n > cfg.max_clearance_items:
             level = worst(level, WARN)
             n_skipped += 1
-            details.append(f"  {layer:<10} {len(items)} features -- OVER the "
+            details.append(f"  {layer:<10} {n} features -- OVER the "
                            f"{cfg.max_clearance_items} limit, gap check NOT RUN "
                            f"(raise --max-clearance-items). These gaps are "
                            f"UNCHECKED, not clean.")
             continue
 
-        # Sweep by xmin so only nearby pairs are compared. A single large
-        # polygon defeats the sweep window on its own, so every surviving pair
-        # still gets a cheap bbox-distance prune before the O(edges^2) test,
-        # and the whole layer runs under a work budget.
-        items.sort(key=lambda t: t[2][0])
-        edges = [edges_bb_of(it.pts, closed=it.kind != "fp_line")
-                 for _, it, _ in items]
         f2 = floor * floor
-        worst_gap, worst_desc, n_bad, ops, incomplete = None, "", 0, 0, False
+        worst_gap, worst_desc, n_bad = None, "", 0
+        ops, incomplete, n_close, n_merged, n_pairs = 0, False, 0, 0, 0
+        # The narrowest SEPARATED gap on this layer whether or not it is legal.
+        # Reporting only the sub-floor worst is how "PASS: all gaps >= 0.0889 mm"
+        # got written about a part whose tightest gap was 0.0889 mm exactly --
+        # true, and indistinguishable from a part with a comfortable margin. A
+        # design sitting on the floor is a design with no margin for etch
+        # variation, and the reader cannot see that from a verdict alone.
+        tight_gap, tight_desc = None, ""
 
-        for a in range(len(items)):
-            if incomplete:
+        for a, b in _candidate_pairs(feats, floor):
+            fa, fb = feats[a], feats[b]
+            ba, bb = fa.bb, fb.bb
+            dx = max(0.0, ba[0] - bb[2], bb[0] - ba[2])
+            dy = max(0.0, ba[1] - bb[3], bb[1] - ba[3])
+            n_pairs += 1
+            if dx * dx + dy * dy >= f2:
+                continue      # pen-inflated bboxes are already further apart
+            ops += len(fa.edges) * len(fb.edges)
+            if ops > cfg.clearance_budget:
+                incomplete = True
                 break
-            ia, ita, ba = items[a]
-            na = len(edges[a])
-            for b in range(a + 1, len(items)):
-                ib, itb, bb = items[b]
-                if bb[0] > ba[2] + floor:
-                    break
-                dx = max(0.0, ba[0] - bb[2], bb[0] - ba[2])
-                dy = max(0.0, ba[1] - bb[3], bb[1] - ba[3])
-                if dx * dx + dy * dy >= f2:
-                    continue  # bboxes already further apart than the floor
-                ops += na * len(edges[b])
-                if ops > cfg.clearance_budget:
-                    incomplete = True
-                    break
-                g = _feature_gap(edges[a], edges[b], ita.width, itb.width,
-                                 floor + (ita.width + itb.width) / 2.0)
-                if g is None or g <= 1e-9:
-                    continue  # touching/merged: one feature, not a dam
-                if g < floor - 1e-9:
-                    n_bad += 1
-                    if worst_gap is None or g < worst_gap:
-                        worst_gap = g
-                        worst_desc = f"#{ia} vs #{ib}"
+            n_close += 1
+            g = _feature_gap(fa.edges, fb.edges, fa.width, fb.width,
+                             floor + (fa.width + fb.width) / 2.0)
+            if g is None or g <= 1e-9:
+                n_merged += 1
+                continue      # touching/merged: one feature, not a dam
+            if tight_gap is None or g < tight_gap:
+                tight_gap = g
+                tight_desc = f"{fa.label} vs {fb.label}"
+            eps = (TEXT_MODEL_EPS_MM if (fa.from_text or fb.from_text)
+                   else 1e-9)
+            if g < floor - eps:
+                n_bad += 1
+                if worst_gap is None or g < worst_gap:
+                    worst_gap = g
+                    worst_desc = f"{fa.label} vs {fb.label}"
 
+        total_pairs += n_pairs
         if incomplete:
             level = worst(level, WARN)
             n_skipped += 1
             details.append(f"  {layer:<10} gap check INCOMPLETE -- exhausted the "
                            f"{cfg.clearance_budget:,}-operation budget with "
-                           f"{len(items)} features. Remaining gaps are UNCHECKED "
+                           f"{n} features. Remaining gaps are UNCHECKED "
                            f"(raise --clearance-budget).")
+        else:
+            n_tested_layers += 1
         if n_bad:
-            level = worst(level, WARN)
+            level = worst(level, _severity(cls, cfg.palette))
             problems.append(f"GAP BELOW FLOOR: {layer} narrowest gap "
-                            f"{worst_gap:.3f} mm < {floor:.3f} mm"
+                            f"{worst_gap:.6f} mm < {floor:.4f} mm"
                             f"{' PROVISIONAL' if prov else ''} ({cls}) in {n_bad} "
-                            f"pair(s), worst {worst_desc}"
-                            + (" -- mask dams this thin wash away and the openings "
-                               "merge" if cls == "mask" else ""))
+                            f"of {n_close - n_merged} separated pair(s), worst "
+                            f"{worst_desc}"
+                            + {"mask": " -- mask dams this thin wash away and "
+                                       "the openings merge",
+                               "silk": " -- silk ink bleeds inward and closes a "
+                                       "gap this fine (docs/pcb-palette.md: a "
+                                       "silk gap is at least as hard to hold as "
+                                       "a silk line)",
+                               }.get(cls, " -- the etchant cannot clear a gap "
+                                          "this fine and the features bridge"))
         elif not incomplete:
-            details.append(f"  {layer:<10} {len(items)} features, all gaps "
-                           f">= {floor:.3f} mm")
+            # State the margin, not just the verdict. `tight_gap` is the
+            # narrowest gap among the pairs that came within the floor of each
+            # other; if nothing did, there is no measured number to quote and
+            # saying so is better than quoting the floor back.
+            if tight_gap is None:
+                tight_gap, tight_desc = _narrowest_separated_gap(
+                    feats, floor * GAP_MARGIN_REACH, GAP_MARGIN_BUDGET)
+            if tight_gap is None:
+                margin = (f"all gaps >= {floor:.4f} mm -- and no separated pair "
+                          f"was found within {GAP_MARGIN_REACH:g}x the floor, so "
+                          f"the narrowest gap is NOT MEASURED here; it is "
+                          f"further out than this check looked")
+            else:
+                over = tight_gap - floor
+                margin = (f"narrowest gap {tight_gap:.6f} mm vs the "
+                          f"{floor:.4f} mm floor: +{over:.6f} mm "
+                          f"({over / floor * 100:.1f}%) [{tight_desc}]")
+                if over <= TEXT_MODEL_EPS_MM:
+                    margin += (" -- ON THE FLOOR: this margin is inside the "
+                               f"{TEXT_MODEL_EPS_MM:g} mm precision of the "
+                               "geometry model itself, so it is a pass with "
+                               "no headroom, not a clean pass")
+            details.append(f"  {layer:<10} {n} features, {n_pairs} pair(s) "
+                           f"compared ({n_close} close enough to measure, "
+                           f"{n_merged} touching), " + margin)
 
-    if level == PASS:
-        head = "all gaps above floor"
+    for layer in sorted(excluded):
+        if layer_class(layer) not in ("silk", "mask", "copper", "buried"):
+            continue
+        why = excluded[layer]
+        level = worst(level, SKIP)
+        problems.append(f"NOT COMPARED: {layer} has {len(why)} item(s) the gap "
+                        f"check cannot represent, so any gap involving them is "
+                        f"UNCHECKED rather than clean: " + "; ".join(why[:3])
+                        + (f" (+{len(why)-3} more)" if len(why) > 3 else ""))
+
+    counter_problems, n_counters = _counter_problems(fp, cfg, details)
+    problems += counter_problems
+    if counter_problems:
+        level = worst(level, _severity("copper", cfg.palette))
+
+    if n_tested_layers == 0 and n_counters == 0 and level == PASS:
+        level = SKIP
+        head = ("NOTHING TESTED -- no layer here has two features to form a "
+                "gap between")
+    elif level == PASS:
+        head = (f"all gaps above floor ({total_pairs} pair(s) over "
+                f"{n_tested_layers} layer(s)"
+                + (f", {n_counters} glyph counter(s)" if n_counters else "")
+                + (f"; {n_untested_layers} layer(s) had nothing to compare"
+                   if n_untested_layers else "") + ")")
     elif problems and n_skipped:
-        head = (f"{len(problems)} layer(s) with sub-floor gaps, "
-                f"{n_skipped} not fully checked")
+        head = (f"{len(problems)} clearance problem(s), "
+                f"{n_skipped} layer(s) not fully checked")
     elif problems:
-        head = f"{len(problems)} layer(s) with sub-floor gaps"
+        head = f"{len(problems)} clearance problem(s)"
     else:
         head = f"{n_skipped} layer(s) NOT FULLY CHECKED -- see details"
     return Check("clearance", level, head, details + problems)
+
+
+def _counter_problems(fp: Footprint, cfg, details: list) -> tuple[list[str], int]:
+    """Copper-to-copper clearance INSIDE a glyph: the counter of an 'e'.
+
+    An enclosed void is bounded by the same stroke on all sides, so it is one
+    connected feature and the pairwise gap test above cannot see it -- the two
+    sides of the bowl are the same path. The void width is a measured property
+    of the letterform instead: stroke_font measures the largest circle that
+    fits in each glyph's tightest enclosed void, at zero pen, and ink centred
+    on the centreline eats half the pen from each side, so
+
+        clear = 2 * D * cap - stroke
+
+    Below the floor the counter fills in and the glyph images as a blob.
+    """
+    sf = _stroke_font()
+    if sf is None:
+        return [], 0
+    worst_by_layer: dict[str, tuple[float, str, float]] = {}
+    for it in fp.items:
+        if it.kind not in ("fp_text", "fp_text_box", "property"):
+            continue
+        ink = expand_text(it)
+        if not ink.ok or not ink.counters:
+            continue
+        for layer in it.layers:
+            if layer_class(layer) not in ("silk", "copper", "buried"):
+                continue
+            for ch, d_em in ink.counters.items():
+                clear = 2.0 * d_em * it.char_h - it.thickness
+                cur = worst_by_layer.get(layer)
+                if cur is None or clear < cur[0]:
+                    worst_by_layer[layer] = (clear, ch, d_em)
+    out, n_judged = [], 0
+    for layer in sorted(worst_by_layer):
+        clear, ch, d_em = worst_by_layer[layer]
+        floor, cls, _ = _floor_for(layer, cfg.palette)
+        if floor is None:
+            continue
+        n_judged += 1
+        if clear < floor - TEXT_MODEL_EPS_MM:
+            out.append(f"COUNTER TOO TIGHT: {layer} the enclosed void of {ch!r} "
+                       f"clears {clear:.6f} mm < {floor:.4f} mm ({cls}) -- "
+                       f"2*{d_em:.5f} em * cap - stroke; this letterform fills "
+                       f"in solid")
+        else:
+            details.append(f"  {layer:<10} tightest glyph counter {ch!r} clears "
+                           f"{clear:.6f} mm (floor {floor:.4f} mm)")
+    return out, n_judged
 
 
 def edges_bb_of(pts, closed=True):
@@ -1741,6 +2586,49 @@ def _feature_gap(ea, eb, wa: float, wb: float, cutoff: float):
 # Driver
 # --------------------------------------------------------------------------
 
+def apply_fab(palette: Palette, key: str) -> list[str]:
+    """Overwrite a palette's fabrication floors from a named process.
+
+    Mutates `palette` and returns the lines describing what moved.
+
+    Only numbers the fab actually publishes are taken, and only onto the floor
+    they describe:
+
+      copper  <- min_copper_mm. Trace width and spacing, stated by every profile.
+      silk    <- min_silk_mm, where stated. OSH Park publishes none.
+      mask    <- min_mask_dam_mm, the web BETWEEN two openings, which is what
+                 the gap check measures. No profile publishes a minimum opening
+                 WIDTH, so nothing here infers one from the copper number: that
+                 would loosen a check using a limit quoted for a different
+                 process step, which is how a part ends up sized against a
+                 figure nobody sells.
+      buried  untouched. No profile publishes a buried-layer limit, and
+                 FabProfile.floor_for() would hand back the outer-layer etch
+                 number -- finer than the doc's provisional 0.50, so taking it
+                 would loosen the one floor already flagged as a guess.
+      edge    untouched. That is the router's bit diameter, not an imaging limit.
+    """
+    prof = fab_profiles.PROFILES[key]
+    out = [f"fab: {prof.name} [{key}] -- {prof.source}"]
+    if prof.surcharge:
+        out.append(f"fab: SURCHARGE {prof.surcharge}")
+    for cls, val, what in (("copper", prof.min_copper_mm, "trace width/spacing"),
+                           ("silk", prof.min_silk_mm, "silkscreen stroke"),
+                           ("mask", prof.min_mask_dam_mm, "mask dam")):
+        if val is None:
+            out.append(f"fab: {prof.name} publishes no {what} -- keeping the "
+                       f"palette's {palette.floors[cls]:.3f} mm, which is NOT "
+                       f"this fab's number. Ask them before ordering.")
+            continue
+        was = palette.floors[cls]
+        palette.floors[cls] = val
+        palette.hard.add(cls)
+        if abs(was - val) > 1e-9:
+            out.append(f"fab: {cls} floor {was:.4f} -> {val:.4f} mm ({what}; "
+                       f"{'tighter' if val > was else 'looser'} than the doc)")
+    return out
+
+
 def verify_file(path: Path, cfg) -> tuple[str, list[Check]]:
     checks: list[Check] = []
     try:
@@ -1751,6 +2639,51 @@ def verify_file(path: Path, cfg) -> tuple[str, list[Check]]:
     checks.append(Check("info", INFO,
                         f'"{fp.name}"  version={fp.version}  '
                         f'generator={fp.generator}  items={len(fp.items)}'))
+
+    # THE FLOOR COMES FROM THE PART.
+    #
+    # A part sized against a vendor process and checked against the palette
+    # doc's generic floor is a part that can emit cleanly and then fail its own
+    # acceptance run -- or, worse, pass it while being finer than anything the
+    # fab sells. tools/microtext.py stamps the process it sized for into the
+    # footprint's tags, and this reads it back, so the two halves resolve the
+    # same number without anybody having to remember to type it twice.
+    #
+    # cfg.palette is never mutated: each file gets its own copy, because a
+    # directory can hold parts built for different processes and the second
+    # file must not inherit the first one's floors.
+    cfg = copy.copy(cfg)
+    cfg.palette = replace(cfg.palette, floors=dict(cfg.palette.floors),
+                          notes=list(cfg.palette.notes),
+                          hard=set(cfg.palette.hard))
+    cfg.render_svg = None
+    try:
+        tagged = fab_profiles.from_tags(fp.tags)
+    except ValueError as e:
+        return FAIL, checks + [Check("fab", FAIL, f"unusable fab tag: {e}")]
+
+    want = getattr(cfg, "fab", None)
+    key, why = None, None
+    if tagged and want and tagged[0] != want:
+        return FAIL, checks + [Check(
+            "fab", FAIL,
+            f"--fab {want} contradicts the part",
+            [f"this footprint is tagged {fab_profiles.tag_for(tagged[0])}, i.e. "
+             f"it was SIZED for {tagged[1].name}.",
+             f"Checking it against {fab_profiles.PROFILES[want].name} would "
+             f"test it against a process it was not built for, and whichever "
+             f"answer came back would be about the wrong board.",
+             "Re-emit the part for the process you mean, or drop --fab and let "
+             "the part speak for itself."])]
+    if tagged:
+        key, why = tagged[0], "read from the footprint's own tags"
+    elif want:
+        key, why = want, ("--fab on the command line; this part carries no "
+                          "fab tag, so nothing in the file corroborates it")
+
+    if key:
+        lines = apply_fab(cfg.palette, key)
+        checks.append(Check("fab", INFO, f"floors from {key} ({why})", lines))
     checks.append(check_kicad_load(path, cfg))
     checks.append(check_size(path, fp, cfg))
     checks.append(check_geometry(fp, cfg))
@@ -1792,11 +2725,26 @@ def main(argv=None) -> int:
     ap.add_argument("--floor-buried", type=float, default=None,
                     help=f"buried-tone min feature, mm (default {FLOOR_BURIED} "
                          f"PROVISIONAL)")
+    ap.add_argument("--fab", default=None, choices=sorted(fab_profiles.PROFILES),
+                    metavar="PROFILE",
+                    help="check copper/mask/silk against a named process from "
+                         "tools/fab_profiles.py instead of the palette doc: " +
+                         ", ".join(sorted(fab_profiles.PROFILES)) +
+                         ". Usually unnecessary -- a part emitted with "
+                         "--microtext-fab carries its process in its tags and "
+                         "is checked against it automatically. Refused if it "
+                         "contradicts what the part says")
     ap.add_argument("--outlier-mm", type=float, default=OUTLIER_MM)
     ap.add_argument("--max-poly-pts", type=int, default=2000,
                     help="skip self-intersection above this vertex count")
-    ap.add_argument("--max-clearance-items", type=int, default=4000,
-                    help="skip the gap check on a layer with more features")
+    ap.add_argument("--max-clearance-items", type=int, default=100_000,
+                    help="skip the gap check on a layer with more features. "
+                         "Was 4000, which predates text expansion: one page of "
+                         "microprint is thousands of copper features, and a "
+                         "limit that turns the check off on exactly the parts "
+                         "that need it is a limit that hides defects. The "
+                         "spatial index made item count cheap; "
+                         "--clearance-budget is the real guard")
     ap.add_argument("--clearance-budget", type=int, default=4_000_000,
                     help="max edge-comparison operations per layer in the gap "
                          "check before it reports itself INCOMPLETE")
@@ -1823,6 +2771,7 @@ def main(argv=None) -> int:
     cfg = Cfg()
     cfg.cli, cfg.kicad_version, cfg.cli_major = cli, kver, choice.major
     cfg.palette, cfg.side = palette, a.side
+    cfg.fab = a.fab
     cfg.allow_layers = set(a.allow_layer)
     cfg.strict = a.strict
     cfg.render = not a.no_render

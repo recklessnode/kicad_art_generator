@@ -24,9 +24,11 @@ B.SilkS
 
 This file is both the specification and the status board. Some of what follows
 is a **conversion mode** — feed it an image and the technique comes out the other
-end — and some is still only **calibration geometry**, drawn parametrically for a
-test coupon and not driven by any picture. Every implemented technique below
-carries an **In the emitter** heading naming its flags; this table is the index.
+end — some is a **board mode**, which takes a `.kicad_pcb` in and gives one back
+and is driven by the board's own geometry rather than by any picture — and some
+is still only **calibration geometry**, drawn parametrically for a test coupon.
+Every implemented technique below carries an **In the emitter** heading naming
+its flags; this table is the index.
 
 | technique | status | how you run it |
 |---|---|---|
@@ -35,18 +37,25 @@ carries an **In the emitter** heading naming its flags; this table is the index.
 | line-pitch modulation *(technique 2)* | **not implemented** | pitch is a constant, not a per-cell variable |
 | stipple, by dot size *(technique 3)* | **conversion mode** | `--fill-mode stipple`, with `--stipple-pitch` / `--halftone-levels` |
 | microprinting | **conversion mode** | `tools/microtext.py`, or `--microtext STRING --microtext-height MM --microtext-tone TONE` on an art footprint |
+| microprinted prose flowed into a shape | **conversion mode** | `tools/microtext.py --shape FILE --shape-element N --shape-height MM`, or the same flags prefixed `--microtext-shape*` on an art footprint |
 | knockout | **conversion mode** | `--knockout MARK[:HOST]`, with `--knockout-floor-mult` |
 | silhouette keyline | **conversion mode** | `--silhouette-tone TONE --silhouette-mm WIDTH` |
 | **T8** translucent window | **conversion mode, but half a part** | `--window-tone TONE` emits the two mask openings only; the four copper keepouts *cannot* be footprint-borne and have to be drawn on the board |
 | **T9** cuts | **conversion mode** | `--cut-tone TONE`, with `--cut-fillet-mm` / `--cut-outer-fillet-mm` |
+| board texture, **subtractive** — slots cut into a pour | **board mode** | `tools/texture_board.py --board IN --tiling hex --tile-mm N --slot-mm W --out OUT` (the default `--texture-mode subtract`) |
+| board texture, **additive** — new copper in empty board | **board mode** | the same, plus `--texture-mode add --add-fill solid\|outline`. Leave `--add-net` off; see **Board texture** below |
+| the spectre aperiodic tiling | **generator verified to level 1 only** | `--tiling spectre` refuses any window past its 9-tile cluster (~15 mm at `--tile-mm 4`); `tools/tilings.py` records why. Use `hex` |
+| board-appearance renders of a footprint | **figure tool** | `tools/board_render.py --lib LIB --fp NAME -o PNG` — recombines the plotted layers through this document's decision tree |
 | tone patches, buried wedges, ladders, registration marks | **calibration geometry only** | `tools/coupon_ladders.py`, `tools/coupon_blocks.py` — parametric, no image goes in |
 | the five-technique visual study | **not footprints at all** | `tools/technique_demo.py` writes a PNG |
 | arcs inside `fp_poly` | **measured, not emitted** | KiCad round-trips them and they are smaller; the emitter still writes straight RDP polylines |
 
 Every mode's output is expected to pass `tools/verify_art.py`. It has one known
-blind spot, named under **Knockout** below. What the implemented modes are
-allowed to promise rests on the measurements collected under **Measured, not
-assumed** at the end of this file.
+blind spot, named under **Knockout** below. Board modes are outside its scope
+entirely — it reads footprints — so they carry their own acceptance proof, named
+under **Board texture**. What the implemented modes are allowed to promise rests
+on the measurements collected under **Measured, not assumed** at the end of this
+file.
 
 ## The four controllable layers
 
@@ -412,6 +421,81 @@ document says are fields and broad shapes, not linework. `T2` puts copper
 letterforms inside **one** block opening and `T6` puts copper under mask with no
 opening at all — the two forms named above, and the only two offered.
 
+### Prose flowed into a shape
+
+`--shape FILE` is a fourth placement, alongside `--at`, `--path` and `--region`,
+and it is not `--region` with a stencil over it. `--region` **repeats** a string;
+`--shape` treats the string as a continuous **body of prose**, breaks it at word
+boundaries to fit the x spans the shape offers on each row, and carries the
+remainder to the next span. **The line lengths are the silhouette.** There is no
+outline anywhere in the output — the mark is drawn by where the text has to stop.
+
+A row band counts a column only if **every** scanline in the band is inside the
+mask (`--shape-center-band` relaxes this to the band's centre line). That is the
+conservative reading: a row of letterforms is as tall as its band, so testing
+only the centre would let ascenders and descenders hang past the silhouette.
+
+Three refusals, all of them the same principle as the rest of this document —
+never truncate silently:
+
+- text left over when the shape fills up is **refused**, with the count of
+  unplaced words and the cap height at which it did fit;
+- a shape that rasterises to nothing is refused, and names `--shape-element` as
+  the fix (`examples/bitcoin_b.svg` stacks a rounded square, a disc and the
+  currency mark, so rasterising the file whole gives a filled square);
+- `--shape-width` and `--shape-height` together are refused, because the mask has
+  one aspect ratio and cannot honour both.
+
+Spans too narrow for the next word are left **blank** and reported, not filled by
+inventing a hyphen the author did not write. `--shape-hyphenate` opts in.
+
+The mask opening stays **one block**, exactly as for `--region`. An opening cut
+to the silhouette would have to place its edge to a tolerance the process does
+not have: registration is ±0.05 mm against a ~0.10 mm stroke.
+
+**The whole Bitcoin whitepaper Introduction fits the ₿ mark at cap 0.6783 mm.**
+`library/RecklessArt.pretty/art_btc_whitepaper_b.kicad_mod`, T2, measured: 1799
+characters / 267 words as 1712 glyphs in 88 `fp_text` runs, 55 row bands at
+1.1044 mm pitch, 88 of 93 mask spans filled, 39.35 × 61.00 mm shape and a
+37.98 × 60.72 mm block opening, 13,615 B. 7/7 PASS on `verify_art.py` under
+kicad-cli 10.0.0. x-height is **0.452 mm** — this is loupe text, not naked-eye
+text, which is what microprinting means.
+
+### The smallest cap height is `floor / D`, and it needs a matching stroke ratio
+
+Both constraints on cap height are linear in cap, so they cross:
+
+    stroke-limited   cap ≥ floor / r
+    counter-limited  cap ≥ floor / (2·D − r)
+
+They are equal at **r = D exactly**, giving **cap = floor / D**, and that is the
+global minimum over every stroke ratio — below it one constraint or the other is
+always violated. For copper on this document's 0.100 mm floor with `'e'` at
+D = 0.14744 em, that is **0.100 / 0.14744 = 0.6782 mm**, a 1:6.782 ratio, inside
+the 1:8–1:6 band. Verified empirically: **0.6782 mm is refused** (stroke
+0.09999 mm) and **0.6783 mm emits**, with stroke *and* `'e'` counter both landing
+on 0.1000 mm.
+
+**This does not happen at the default stroke ratio.** `microtext.py` defaults to
+1:6.7 (r = 0.14925), and at that ratio the same body is counter-limited and
+refused below **0.695 mm**. Reaching 0.6783 mm requires
+`--stroke-ratio 0.14744` — passing D as the ratio. Anyone reproducing the number
+without that flag will get 0.695 and conclude this section is wrong.
+
+**Fab caveat, and it binds.** The 0.100 mm floor sits between vendor tiers, and
+at r = D every tier's minimum cap is just `floor / D`:
+
+| fab capability | minimum cap | binding |
+|---|---|---|
+| 0.127 mm — standard, 5 mil | **0.8614 mm** | stroke — *a standard fab cannot build the 0.6783 mm part* |
+| 0.100 mm — this document's copper floor | **0.6783 mm** | stroke and counter together |
+| 0.090 mm — advanced, at extra cost | 0.6104 mm | stroke |
+| 0.075 mm — needs a capable fab | 0.600 mm | legibility, not fab |
+
+A coarser fab does not scale the mark by the cap ratio: the flow re-breaks at
+every span, so the shape has to be re-sized and the run repeated until the body
+fits again. Do not derive the new dimensions arithmetically.
+
 ### The counters are measurable, so they are measured
 
 `tools/stroke_font.py` reads KiCad's newstroke font off a `kicad-cli fp export
@@ -703,6 +787,197 @@ catches those. Do not read a harness PASS as clearance on a knockout.
 
 ---
 
+# Board texture: the pour as canvas
+
+Everything above turns a picture into a footprint. This does not. `--tiling` is a
+**board mode**: `tools/texture_board.py` reads a `.kicad_pcb`, works out where
+decoration is allowed from the board's own geometry, lays a tiling there, and
+writes a board back out. No image goes in, and there is no footprint anywhere in
+the path — because **a footprint cannot carry a copper keepout** (see *Measured,
+not assumed*), so the geometry has to be board-level or it is silently ignored.
+
+It runs under KiCad's bundled Python and uses `pcbnew`, not an s-expression
+parser. That is correctness, not convenience: `zone.GetFilledPolysList()` returns
+the actual fill with thermals, clearance voids and dropped islands already
+resolved, and KiCad 10 writes nets as `(net "Name")` **strings**, so a regex
+written for the old numeric form matches nothing and reports a huge permitted
+area with no symptom at all.
+
+## Two directions, one permitted region
+
+| mode | what it does | what it looks like |
+|---|---|---|
+| `--texture-mode subtract` *(default)* | cuts slot walls **into** an existing pour, as board-level rule areas | the pour, engraved |
+| `--texture-mode add` | lays **new** copper where the board is empty, under closed mask | **T6** — the dark under-mask sheen, not gold |
+
+The base region inverts and nothing else does. Subtract starts from the pour and
+removes obstacles; add starts from the whole board inside `Edge.Cuts` and removes
+the same obstacles *plus* every copper feature of every net *plus* every mask
+opening. Clearances, courtyards, the board-edge inset and whole-tile placement
+are shared code in both directions.
+
+That inversion is the whole argument for add mode, and it is a measured one. On
+the reference board subtract mode finds **41.0 %** of the 1691.5 mm² `F.Cu` pour
+permitted — about 693 mm². Add mode finds **8575.0 mm², 55.7 % of the board**:
+twelve times as much, because a plane covering a fifth of the board has a large
+complement. That is the difference between a texture and scattered confetti.
+
+**Whole tiles only.** A tile is kept only if it lies *entirely* inside the
+permitted region; nothing is ever clipped. A clipped tile has a cut wall that
+does not close, which isolates copper. On the reference board that drops 490 of
+612 candidates in subtract mode and 1906 of 3094 in add mode — and dropping is
+always the safe direction, because it only ever leaves more copper.
+
+## In the tools
+
+`tools/texture_board.py --board IN --side front|back|both --tiling KIND
+--tile-mm N --slot-mm W --out OUT`. `--report` runs the ingest half alone and
+prints the permitted region without writing a board.
+
+`tools/tilings.py` supplies the geometry: `checker`, `hex`, `spectre`,
+`spectre-curved`. **`--tile-mm` is the equal-area size** — every kind produces
+tiles of area exactly `tile_mm²`, which is the only definition under which two
+kinds are comparable, and comparing them is the point. Measured at `tile_mm 6`:
+
+| kind | edges | perimeter per tile | slot length per mm² |
+|---|---|---|---|
+| `checker` | 4 | 24.000 mm | 0.3667 (0.3333 in bulk) |
+| `hex` | 6 | 22.335 mm | 0.3554 (0.3102 in bulk) |
+
+So hex costs **7 % less slot** than checker for the same tile area — which is
+also 7 % less copper removed, and 7 % fewer vertices in the board file.
+
+**Use `hex`.** `spectre` is mathematically audited but only to its 9-tile
+cluster, roughly 15 mm across at `--tile-mm 4`; asked for anything larger it
+**refuses** rather than emit unaudited geometry. See *The spectre stops at level
+1* below.
+
+## Every wall gets a neck, and the reason is not aesthetic
+
+Cutting closed cell outlines into a pour isolates every cell interior. Each wall
+therefore carries a **tie-neck**, a gap in the slot, so the surviving copper
+stays one connected region. `--neck-style midedge` is the default.
+
+`--neck-style forest` — a provable spanning tree of walls, so the cut set is
+acyclic — is **not sufficient**, and this was measured, not reasoned: it still
+isolated 21.0 mm² at the pour's east edge. An acyclic wall set guarantees
+connectivity in the *plane*; the copper is a bounded region, and a slot chain
+that reaches its boundary twice severs it regardless. A neck in **every** wall is
+what makes the guarantee shape-independent.
+
+`--neck-mm` is **the copper that survives**, not the centreline gap. A round slot
+cap is a half-disc of radius `slot/2` on the cut endpoint, so it overhangs; the
+neck accounting subtracts it (`cap_extend_mm()`). Getting this wrong is not
+subtle — see *Measured, not assumed*.
+
+## Add mode: float the copper
+
+Added copper in empty board is either floating or carries a net. Both were built
+and both went through DRC on the real board:
+
+| | DRC |
+|---|---|
+| floating (no net tag) | 206 warnings, 0 errors, **0 unconnected** — identical to the untextured baseline by type and severity |
+| `--add-net GNDREF` | 206 warnings, 0 errors, **499 unconnected items**, every one severity *error* |
+
+**Float it.** The reason is not that DRC dislikes the alternative — it is that the
+alternative does not do what its name suggests. `SetNetCode(GNDREF)` declares
+that the copper *ought* to be on GNDREF; the copper is still an isolated island,
+so the connectivity engine is right to report 499 missing connections. The board
+is not more grounded for having been labelled.
+
+Nor can stitching vias fix it, and that was measured too: of the 4671.5 mm² added
+on `F.Cu`, GNDREF lies beneath **0.0 %** on `In1.Cu`, `In2.Cu` and `B.Cu` alike.
+That is the definition of the mode — texture goes where there is no copper, and
+on this board the inner planes follow the outer ones — so there is nothing under
+it to stitch down to. The largest island is 7.658 mm² and none exceeds 3.43 mm
+across; isolated metal that small is what every fab's own copper-thieving pattern
+already is.
+
+`--add-fill solid` is the default and lays **9098.0 mm² in 1188 islands**;
+`--add-fill outline` lays 1956.3 mm² in 21. Solid is 4.7× the copper for the same
+tiles and the same electrical cost — nothing was removed either way — and it is
+what a texture that has to read through black mask wants.
+
+**Tiles are `PCB_SHAPE`s, never zones.** Every pour on the reference board sets
+`island_removal_mode = ALWAYS`. A tile emitted as a zone is a fill with no pad on
+it — an island — so the filler *deletes* it on the next refill: the texture would
+vanish from the plots while the `.kicad_pcb` still described it. A `PCB_SHAPE` is
+not a fill, so the filler never touches it, and it is copper to the gerber and
+copper to DRC.
+
+## The acceptance proof, because `verify_art.py` cannot see boards
+
+Four checks, all run on the real board and all reported in `--texture-json`:
+
+1. **The pour is the identical region afterwards** — not "the areas match", which
+   two different regions can do, but the **symmetric difference** of the filled
+   polygons before and after. Add mode, floating: **0.0 mm² on `F.Cu`**,
+   8.2e-08 mm² on `B.Cu`. The tolerance was *measured*: refilling the untextured
+   board three times in one process gives symdiff exactly 0.000e+00 every time,
+   so the filler is deterministic and the noise floor is zero — which is why that
+   8.2e-08 had to be explained rather than waved through. It is one Clipper
+   vertex landing differently once the filler has a foreign object to clear at
+   all, 1.1e-08 % of the pour and four orders of magnitude under the pour's own
+   0.25 mm `min_thickness`. Tied to GNDREF it reads 0.0, because same-net copper
+   needs no clearance.
+2. **Connectivity by component *area*, not count.** Subtract mode on `F.Cu`:
+   1559.188 / 126.376 / 6.134 / 3.299 mm² becomes 1495.246 / 126.376 / 6.134 /
+   3.299 — three components unchanged to 1e-9 mm², one smaller by exactly the
+   slot area. 4- and 8-connectivity agree.
+3. **An independent raster flood fill**, which is the only direct look at the
+   topology: with `island_removal_mode = ALWAYS` the filler deletes isolated
+   cells rather than leaving them, so a component count alone cannot fail. Zero
+   copper lost to islands on either layer.
+4. **DRC against an untextured control**, compared by type *and* severity, not by
+   total. 206 warnings / 0 errors both ways: the texture added nothing.
+
+The clearance that makes check 1 hold is `--clr-copper`, default **0.55 mm** and
+deliberately not the 0.5 mm the other knobs use. Every pour here carries
+`local_clearance 0.5 mm`, so new copper at exactly 0.5 mm sits on the boundary at
+which the filler starts voiding the pour around it.
+
+**Fill time is not a constraint.** 1.13 s at 346 keepout zones, against 1.13 s
+untextured. Swept separately the knee is around 2000 zones (1.48 s), reaching
+10.3 s at 6000 and 14.9 s at 11500.
+
+## Board-specific guards, and why they are in the tool
+
+Three of the exclusions are not generic and are named as such in the source:
+
+- **HS1 is mis-modelled.** Only its four M3 bosses are courtyard; the 40 mm body
+  outline sits on `B.Silkscreen`, so the footprint under-reports the heatsink by
+  roughly 12× in area. The true front envelope, measured, is
+  x 72.22…119.78, y 52.42…99.97 mm. Tracked as SatoshiStarter#55.
+- **The VRM-to-ASIC return corridor** — L1 (151.5, 75.5) to U9 (100.0, 72.5) — is
+  excluded outright. Texture across a return path is a decision about current,
+  not about art.
+- **The texture is derived from board state**, so any placement or routing change
+  invalidates it. Regenerate; never maintain, and never merge a textured board
+  back into a development branch.
+
+## The spectre stops at level 1
+
+`SPECTRE_VERIFIED_LEVEL = 1`, and it is not a knob — it is what the audit earned.
+The tile and its 9-tile cluster are exact and hard-audited; a level-2 patch was
+built with the published 71 tiles, zero overlaps, one boundary loop, no holes and
+no reflected tile, and was **rejected on compactness**: 64 % hull fill against
+80.4 % for a true supertile.
+
+**Do not go hunting for a better anchor quad.** The cause is structural and was
+measured: the quad grows by exactly **3.000000** per substitution step where the
+tile counts force `sqrt(4 + sqrt(15)) = 2.805884`, so the eight children are
+pushed 6.9 % too far apart per level and the patch comes out as a ring of eight
+clusters around a connected void of 21.2 tile areas. The quad is forced (of
+24024 ordered vertex 4-tuples exactly four make a valid cluster, and all four
+give the same one), and no anchor quad fixes it (0 hits across all 32⁴ =
+1,048,576 super-quad rules at tolerance 1e-7). The next thing to try is
+structural and is written up in `tools/tilings.py`: the module collapses the nine
+metatile labels into two, and restoring them — each with its own quad — is the
+candidate fix. Until then, `hex`.
+
+---
+
 # Measured, not assumed
 
 Findings from running the tools rather than reasoning about them, against the
@@ -722,6 +997,59 @@ Stated in full under T8 above, because it is what stops a translucent window
 being a self-contained part. It is also why `tools/texture_board.py` is
 board-in / board-out and reasons in board coordinates throughout, rather than
 generating a footprint.
+
+## Zone fills on disk are stale until refilled, and `NeedRefill()` will not tell you
+
+The filled polygons stored in a `.kicad_pcb` are whatever the last fill left
+behind. Editing tracks does not invalidate them on disk, so any area read from a
+board file can be confidently wrong with no symptom.
+
+The obvious guard does not work. **`ZONE::NeedRefill()` is an in-session dirty
+flag and is not persisted**: measured on a never-refilled copy of the reference
+board *and* on a `kicad-cli pcb drc --refill-zones --save-board` copy of it, it
+answers `False` for all 15 zones in both cases. A check built on it would pass
+every stale board on earth.
+
+So `texture_board.py` does not check — it **refills in process** via
+`pcbnew.ZONE_FILLER` before measuring anything (1.2 s for this board), and
+`--no-refill --report` prints the per-layer area delta the refill would have
+produced, which is the only honest staleness indicator available. For the
+reference board those deltas are −0.17 mm² on `F.Cu`, −0.05 on `In1.Cu`, −0.13 on
+`B.Cu` and 0.00 on `In2.Cu` — Clipper rounding noise, so its stored fills were
+already current.
+
+## `Unfracture()` on an already-unfractured polygon set destroys its holes
+
+Measured: the reference board's `B.Cu` pour, **1377.8 mm² with 41 holes**, comes
+back as **1422.1 mm² with 0 holes** after a single `Unfracture()` call. It
+silently filled in 44.3 mm² of void — and every area check still "passes",
+because the area it reports is the area it now has.
+
+`Unfracture()` is therefore called **nowhere** in this repo, and `Fracture()` only
+ever on a throwaway copy.
+
+## A round slot cap overhangs its endpoint, and the filler will eat the result
+
+A round cap is a half-disc of radius `slot/2` centred on the cut endpoint, so it
+reaches `slot/2` past it. Asking for a 0.40 mm tie-neck with a 0.25 mm
+round-capped slot therefore leaves `0.40 − 2×0.125 = 0.15 mm` of copper — under
+the pour's own **0.25 mm `min_thickness`**.
+
+What the filler then did is the reason this is written down: it deleted every
+neck, and then deleted every cell as an isolated island. **355.7 mm² of copper
+gone**, the texture replaced by hexagonal bites out of the pour edge, from a
+0.10 mm arithmetic error. `--neck-mm` now means the copper that **survives**, and
+`cap_extend_mm()` subtracts the caps.
+
+## An acyclic cut set does not guarantee connected copper
+
+`--neck-style forest` selects a provable spanning tree of walls, so the cut set
+has no cycles — and it still **isolated 21.0 mm²** at the pour's east edge.
+
+Acyclicity guarantees connectivity in the *plane*. The copper is a bounded
+region, and a slot chain that reaches its boundary twice severs it whatever its
+cycle structure. Only a neck in **every** wall makes the guarantee independent of
+the pour's shape.
 
 ## Buried tones cannot be previewed from a footprint
 
@@ -795,6 +1123,18 @@ measurement, so coverage percentages read off them describe geometry rather than
 appearance. Tracked as issue **#1 — calibrate the palette: sample real tones from
 a reference board**, which is also the issue that turns the black-mask anchors
 themselves from estimates into measurements.
+
+**And #1 now needs a coupon per mask colour, not one coupon.** On a *light* mask
+the tone ordering does not merely shift, it **inverts**: with white mask and
+white silk, T1 and T5 are the same tone and silkscreen is invisible — the same
+failure mode as art whose subject maps to T5, arriving from the other direction —
+and with white mask and black silk, T1 goes from the brightest tone to the
+darkest and T5 from the darkest to the brightest. That is structural, not a
+matter of which anchor values are right. Anything with lightness-dependent logic
+branches on it, and the halftone ramp is the known one: it ramps *from* T5 as
+background *toward* the tone, and declines any tone under 20 L\* of separation.
+On a light board that gate makes the opposite decision. Nothing in the tree
+handles this today; it is recorded here so the calibration work scopes it.
 
 ---
 

@@ -27,9 +27,16 @@ easy wins concentrate.
 | palette spec, W0 quantiser spike, calibration coupons, technique study | `ccfa35a`, `0274292`, `2d9aaba`, `a4f9ca5`, `52b344a`, `0239f86`, `cdf3033`, `90d322d`, `0c35928` | 2026-08-11 | **Claude Opus 5** |
 | W1 emitter, acceptance harness, asset ingest, render driver, coupon floors | `268052e`, `2cfffc2`, `cd20664`, `5ac55d1`, `166af9a`, `fc6bc2c` | 2026-08-16 | **Claude Opus 5** |
 | hex ASIC cutout part; min-area, output-size, Tux and green-mask renders | `c619f92`, `6ff633c`, `3c62c52`, `5ab25fc`, `13600b5`, `a80d190` | 2026-08-16 | **Claude Opus 5** |
-| **conversion modes** — T8 windows, T9 cuts, microtext, silhouette keyline, knockout, hatch/stipple fills | working tree, uncommitted | 2026-08-16 | **Claude Opus 5** |
-| board-level texture ingest (`tools/texture_board.py`, part 1 of 2) | working tree, uncommitted | 2026-08-16 | **Claude Opus 5** |
-| palette status board + measured-facts chapter; this log pass | working tree, this entry | 2026-08-16 | **Claude Opus 5** |
+| **conversion modes** — T8 windows, T9 cuts, microtext, silhouette keyline, knockout, hatch/stipple fills | `0336559` | 2026-08-16 | **Claude Opus 5** |
+| microtext audit fix + reproducible SVG rasterisation | `b4666dc` | 2026-08-16 | **Claude Opus 5** |
+| palette status board + measured-facts chapter; August log entries | `5c029b6` | 2026-08-16 | **Claude Opus 5** |
+| tiling generators (`tools/tilings.py`) — checker, hex, spectre; exact ring arithmetic | working tree, uncommitted | 2026-08-17 | **Claude Opus 5** |
+| spectre level-2 investigation and the impossibility ledger | working tree, uncommitted | 2026-08-17 | **Claude Opus 5** |
+| board texture, both halves (`tools/texture_board.py`) — ingest, slots, tie-necks, acceptance | working tree, uncommitted | 2026-08-16/17 | **Claude Opus 5** |
+| additive texture (`--texture-mode add`) | working tree, uncommitted | 2026-08-17 | **Claude Opus 5** |
+| microtext shape flow (`--shape`) and the whitepaper ₿ part | working tree, uncommitted | 2026-08-17 | **Claude Opus 5** |
+| board-appearance render driver (`tools/board_render.py`) | working tree, uncommitted | 2026-08-17 | **Claude Opus 5** |
+| palette board-texture chapter, shape-flow section; this log pass | working tree, this entry | 2026-08-17 | **Claude Opus 5** |
 
 The April attribution is **not recorded in the repository**. What the history
 actually contains, checked rather than assumed:
@@ -1251,3 +1258,345 @@ concurrent edit had a good chance of clobbering it; the flags are self-documenti
 via `--help` until someone does it deliberately.
 
 Nothing committed; all of it is in the working tree.
+
+---
+
+## 2026-08-17 — Board texture: the pour becomes the canvas, both ways
+
+**Models:** Opus 5 (all work).
+
+`tools/texture_board.py` is now whole. It is not a conversion mode and there is
+no footprint anywhere in it: it reads a `.kicad_pcb`, decides where decoration is
+allowed from the board's own geometry, lays a tiling there, and writes a board
+back. It has to be board-level, because a footprint-borne copper keepout is
+silently ignored by the KiCad 10 filler — the fact recorded on 2026-08-16, now
+load-bearing rather than interesting.
+
+It runs under KiCad's bundled Python on `pcbnew` rather than parsing
+s-expressions, and the sharper of the two reasons is a silent-failure one: KiCad
+10 writes nets as `(net "Name")` **strings**, so a regex written against the old
+numeric form matches nothing, selects an empty obstacle set, and reports a huge
+permitted area with no symptom at all.
+
+### Add mode, and the number that decided it
+
+A requirement change from the board owner: texture should be F.Cu material under
+closed mask — not gold, just texture — and should appear wherever there is mask
+with no copper to interfere with. So `--texture-mode add` lays **new** copper in
+**empty** board: tone T6, the dark under-mask sheen, against T5 bare mask.
+
+Only the base region inverts. Subtract starts from the pour and removes
+obstacles; add starts from the whole board inside `Edge.Cuts` and removes the
+same obstacles plus every copper feature of every net plus every mask opening.
+Clearances, courtyards, the HS1 envelope, the return corridor, the edge inset,
+whole-tile placement and fragment dropping are shared code in both directions.
+
+The measurement that answered the owner's question, on the reference board:
+
+| | permitted | placed | copper |
+|---|---|---|---|
+| subtract, `F.Cu` | 41.0 % of the 1691.5 mm² pour ≈ 693 mm² | 44 tiles, 172 dropped | −3.51 % of the pour |
+| add, `F.Cu` + `B.Cu` | 8575.0 / 9125.4 mm², **55.7 % / 59.2 % of the board** | 1188 of 3094 tiles | +9098.0 mm² in 1188 islands |
+
+Twelve times the area, because a plane covering a fifth of the board has a large
+complement. That is the difference between a texture and scattered confetti.
+`--add-fill outline` was built too and lays 1956.3 mm² in 21 islands; solid is
+4.7× the copper for the same tiles and the *same* electrical cost, so it is the
+default.
+
+### Float it. Tying it to GNDREF is a label, not a connection
+
+Both were built and both went through DRC on the real board. Floating: 206
+warnings, 0 errors, **0 unconnected** — identical to the untextured baseline by
+type and severity. `--add-net GNDREF`: 206 warnings, 0 errors, and **499
+unconnected items**, every one severity *error*.
+
+The recommendation is floating, and not because DRC dislikes the alternative.
+`SetNetCode(GNDREF)` declares that the copper *ought* to be on GNDREF; the copper
+is still an isolated island, so the connectivity engine is right. The board is
+not more grounded for having been labelled.
+
+Stitching vias cannot fix it either, and that was measured rather than assumed:
+of the 4671.5 mm² added on `F.Cu`, GNDREF lies beneath **0.0 %** on `In1.Cu`,
+`In2.Cu` and `B.Cu` alike. That is the definition of the mode — texture goes
+where there is no copper, and here the inner planes follow the outer ones — so
+there is nothing under it to stitch down to. Largest island 7.658 mm², none over
+3.43 mm across; that is what a fab's own thieving pattern already is.
+
+A third option was rejected before it was built: emitting tiles as **zones**.
+Every pour on this board sets `island_removal_mode = ALWAYS`, so a tile-as-zone
+is an island and the filler deletes it on the next refill — the texture would
+vanish from the plots while the file still described it. `PCB_SHAPE` is not a
+fill, so the filler never touches it.
+
+### Three things measurement overturned, each already coded the wrong way round
+
+1. **A round slot cap overhangs its endpoint by `slot/2`.** A 0.40 mm neck with a
+   0.25 mm round-capped slot leaves 0.15 mm of copper, under the pour's 0.25 mm
+   `min_thickness`. The filler deleted every neck, then every cell as an island:
+   **355.7 mm² gone**, the texture replaced by hexagonal bites out of the pour
+   edge, from a 0.10 mm arithmetic error. `--neck-mm` now means the copper that
+   *survives*, and `cap_extend_mm()` subtracts the caps.
+2. **An acyclic wall set does not guarantee connected copper.** `--neck-style
+   forest` is a provable spanning tree and still isolated **21.0 mm²** at the
+   pour's east edge: acyclicity guarantees connectivity in the *plane*, and the
+   copper is a bounded region a slot chain can sever by reaching its boundary
+   twice. A neck in every wall is what makes the guarantee shape-independent.
+3. **The flood-fill raster has to cover the whole pour, not the permitted
+   region.** Sized to the permitted region it cropped the pour and reported
+   `F.Cu` as 3 components of 765.814 mm² instead of 4 of 1562.485.
+
+### The proof, since `verify_art.py` reads footprints and cannot see boards
+
+Not "the areas match" — two different regions can share an area. The check is the
+**symmetric difference** of the filled polygons before and after: add mode
+floating gives **0.0 mm² on `F.Cu`** and 8.2e-08 mm² on `B.Cu`.
+
+The tolerance was measured rather than chosen. Refilling the untextured board
+three times in one process gives symdiff exactly 0.000e+00 for every pair, so the
+filler is deterministic and the noise floor is *zero* — which is why 8.2e-08 had
+to be explained instead of waved through. It is one sliver at x 88.785,
+y 71.06…71.23: a polygon vertex landing differently in Clipper's integer
+arithmetic once the filler has a foreign object to clear at all. Same-net copper
+needs no clearance, which is exactly why the GNDREF variant reads 0.0. It is
+1.1e-08 % of the pour. The clearance that makes this hold is `--clr-copper`,
+default **0.55 mm** and deliberately not the 0.5 mm the other knobs use, because
+every pour here carries `local_clearance 0.5 mm`.
+
+Connectivity is proved by component **area**, not count: subtract mode takes
+`F.Cu` from 1559.188 / 126.376 / 6.134 / 3.299 mm² to 1495.246 / 126.376 / 6.134
+/ 3.299 — three components unchanged to 1e-9 mm², one smaller by exactly the slot
+area. 4- and 8-connectivity agree, and an independent raster flood fill agrees;
+that probe is the only direct look at the topology, because with island removal
+ALWAYS the filler deletes isolated cells rather than leaving them, so a component
+count alone cannot fail.
+
+Fill time is not a constraint: **1.13 s at 346 keepout zones** against 1.13 s
+untextured, knee around 2000 zones (1.48 s), 14.9 s at 11500.
+
+### Two zone-filler traps recorded in `Measured, not assumed`
+
+`ZONE::NeedRefill()` is an in-session dirty flag and is **not persisted** — it
+answers `False` for all 15 zones on a never-refilled board *and* on a freshly
+refilled one, so a staleness check built on it would pass every stale board on
+earth. Ingest refills in process instead. And `Unfracture()` on an
+already-unfractured set **destroys its holes**: the `B.Cu` pour goes 1377.8 mm²
+with 41 holes to 1422.1 mm² with 0 holes, silently filling 44.3 mm² of void, and
+every area check still passes because the area it reports is the area it now has.
+
+### What is board-specific, and named as such
+
+HS1 is mis-modelled — only its four M3 bosses are courtyard, the 40 mm body
+outline sits on `B.Silkscreen`, so the footprint under-reports the heatsink by
+about 12× in area; the true front envelope is x 72.22…119.78, y 52.42…99.97 mm
+(SatoshiStarter#55). The VRM-to-ASIC return corridor, L1 (151.5, 75.5) to U9
+(100.0, 72.5), is excluded outright — texture across a return path is a decision
+about current, not about art. And the texture is derived from board state, so any
+placement or routing change invalidates it: regenerate, never maintain, never
+merge a textured board back.
+
+---
+
+## 2026-08-17 — Tilings, and why the spectre stops at level 1
+
+**Models:** Opus 5 (all work).
+
+`tools/tilings.py` is pure geometry — no board, no KiCad, no file I/O — and
+supplies `checker`, `hex`, `spectre` and `spectre-curved`. Two decisions in it
+are worth the log.
+
+**`tile_mm` is the equal-area size.** Every kind produces tiles of area exactly
+`tile_mm²`, because that is the only definition under which two kinds are
+comparable, and comparing them is the point: the number that decides what a
+texture costs is slot length per unit area. Measured at `tile_mm 6` — checker
+24.000 mm perimeter per tile and 0.3667 mm of slot per mm²; hex 22.335 mm and
+0.3554. Hex costs **7 % less slot** for the same tile area, so 7 % less copper
+removed and 7 % fewer vertices in the file.
+
+**Construction coordinates are exact.** Vertices of Tile(1,1) live in the ring
+`Z[d]`, `d = exp(iπ/6)`, so a vertex is an integer 4-tuple, every 30° rotation is
+an integer operation, and two tile edges either coincide *exactly* or not at all.
+There is no tolerance anywhere in the fit check.
+
+### Level 2 was not reached, and nobody should look for it in this framework
+
+`SPECTRE_VERIFIED_LEVEL` stays at **1**. A level-2 patch was built — 71 tiles,
+the published count, zero overlaps, one boundary loop, no holes, no reflected
+tile — and rejected on compactness at **64 % hull fill** against 80.4 % for a
+true supertile. What is new is that the cause is no longer a suspicion about a
+subtly wrong anchor quad. It is structural, and it was measured:
+
+- **The quad is forced.** Sweeping all 14·13·12·11 = 24024 ordered vertex
+  4-tuples, exactly **four** make a valid 9-tile cluster, and all four produce the
+  identical cluster at 80.4 % fill. Level 1 is not one option among many.
+- **The quad map is linear, so its growth is a fixed number.** The eight slot
+  rotations come from the cumulative turns in the rules and never touch the quad;
+  each slot translation is a fixed ring combination of the four quad points. One
+  substitution step is therefore a fixed 4×4 complex matrix.
+- **That number is 3, and it has to be 2.805884.** Measured by iterating the map:
+  perimeters 29.031, 87.580, 262.740, 788.221, … a ratio of **3.000000000** from
+  level 3 on, against `sqrt(4 + sqrt(15)) = 2.805883701` forced by the tile
+  counts. The quad outruns the metatile by 6.9 % per level, compounding, and the
+  level-2 patch comes out as a **ring of eight clusters around one connected void
+  of 21.2 tile areas** — 2.36 clusters' worth, measured by rasterising the patch
+  and flood-filling inside its hull. The 64 % was measuring exactly that.
+- **No anchor quad fixes it.** Across all 32⁴ = 1,048,576 super-quad rules, not
+  one has any eigenvalue of modulus 2.805884 (0 hits at 1e-7 and at 1e-9; nearest
+  miss 2.8058798). The current constant sits at eigenvalues [3, 1, 0, 0].
+- **Nor does re-deriving the rules.** Re-describing the verified cluster as a
+  7-rule chain — every base tile, every Mystic partner, all 5040 slot orderings —
+  yields 1794 chain descriptions; the nine with the canonical
+  60/60/120/180/180/240/120 rotation sequence give five distinct rule sets, and
+  all five fail the same eigen test.
+
+So the statement is stronger than "level 2 was not found": for these rules, with
+an anchor quad made of (slot, quad-index) points, a level-2 supertile does not
+exist, and 64 % is a necessary consequence rather than bad luck. Changing
+`SPECTRE_SUPER_QUAD` cannot help.
+
+Two things are left open and are written into the module so the next person
+starts where this stopped. 1747 of the 1794 chain descriptions were never
+eigen-scanned — only the nine matching the published turn sequence were, which is
+a judgement, not a proof, and the scan is mechanical. And the likeliest real fix
+is not in the space searched at all: this module collapses the nine metatile
+labels into two, which reproduces the tile counts exactly — which is *why* every
+count-based check passes — but if the labels carry different quads then the quad
+is not one vector under one linear map and the growth argument does not apply to
+the real system. Restoring the nine labels, each with its own quad, is the thing
+to try.
+
+A quad-free direct fit was also tried and is explicitly **not** evidence: all
+three runs (1752, 2030 and 10004 complete placements) were stopped by their own
+time budget rather than exhausting the space, and the overlap test capped its
+pair list, so genuinely overlapping arrangements were let through. It rules
+nothing out and is recorded so nobody repeats it thinking it settled something.
+
+`spectre` therefore **refuses** any window bigger than its 9-tile cluster —
+roughly 15 mm across at `--tile-mm 4`; measured, a 14 mm window yields 4 tiles
+and a 15 mm window is refused — rather than emit unaudited geometry. The
+aperiodicity claim is not made for it either: a 9-tile cluster cannot demonstrate
+absence of translational symmetry. The scan itself is known to work, because the
+periodic kinds score exactly 1.0000 on it (checker 68 exact repeats of 68, hex 54
+of 54); it simply has nothing big enough to run on, so
+`test_spectre_has_no_translational_symmetry` remains a strict `xfail` and did not
+silently convert to a pass.
+
+One honest caveat about the tile itself: this module emits Tile(1,1) with
+**straight** edges, which is not by itself an aperiodic monotile — straight edges
+let a reflected copy sit against an unreflected one. What is produced is a
+specific, verified, non-periodic tiling *by* Tile(1,1), using rotations and
+translations of one handedness only; no patch this module builds contains a
+reflected tile, and a test asserts it tile by tile. Straight edges are a
+fabrication choice: every edge becomes a slot, a curve becomes a polyline anyway,
+and each extra vertex costs board file for no visible gain at a 2–6 mm tile.
+`spectre_curved()` is there if the look is wanted.
+
+---
+
+## 2026-08-17 — Prose flowed into a shape, and the whitepaper at 0.6783 mm
+
+**Models:** Opus 5 (all work).
+
+`tools/microtext.py` gains a fourth placement, `--shape FILE`, alongside `--at`,
+`--path` and `--region`. It is **not** `--region` with a stencil over it:
+`--region` repeats a string, while `--shape` treats the string as a continuous
+body of prose, fills each x span the mask offers on each row greedily on word
+boundaries, and carries the remainder to the next span. The line lengths *are*
+the silhouette — there is no outline in the output at all.
+
+Vertical metrics are taken once, from the whole body, and every run is anchored
+against them. Measuring each chunk's own ink box instead would sit a chunk with
+no descender lower than its neighbour and the rows would visibly stagger. A row
+band counts a column only if **every** scanline in the band is inside the mask;
+`--shape-center-band` relaxes that, at the cost of letting ascenders and
+descenders hang past the silhouette.
+
+Three refusals, on the same principle as the rest of the tool. Text left over
+when the shape fills up is refused, naming the unplaced word count and the cap at
+which it did fit. A shape that rasterises to nothing is refused and names
+`--shape-element` as the fix — `examples/bitcoin_b.svg` stacks a rounded square,
+a disc and the currency mark, so rasterising it whole gives a filled square,
+which is not the shape anyone means by "the mark". And `--shape-width` with
+`--shape-height` is refused, because the mask has one aspect ratio and cannot
+honour both. Spans too narrow for the next word are left blank and reported
+rather than filled by inventing a hyphen the author did not write;
+`--shape-hyphenate` opts in.
+
+### The Bitcoin whitepaper Introduction, in the Bitcoin mark
+
+`library/RecklessArt.pretty/art_btc_whitepaper_b.kicad_mod`. Section 1 of
+`bitcoin.pdf`, taken from the canonical file rather than typed from memory,
+extracted with a purpose-written PDF text pass (zlib + `/ToUnicode` CMaps + a
+text-matrix walk) and split at the paragraph break by **measured typeset width**
+summed from the fonts' own `/Widths`, not by character count — section 1 is
+justified and has no extra leading between its paragraphs, so a character count
+mis-splits it. 1799 characters, 267 words, pure ASCII, so no glyph substitutions.
+Section 2 was not needed: the shape was sized so section 1 exactly fills it.
+
+Measured on the emitted part: **1712 glyphs in 88 `fp_text` runs**, 55 row bands
+at 1.1044 mm pitch, 88 of 93 mask spans filled, shape 39.345 × 61.000 mm, block
+opening 37.981 × 60.716 mm, 13,615 B, T2. The 87-character difference is
+inter-word spaces consumed at span ends — integrity was proved by reading the
+`.kicad_mod` back and rejoining the 88 runs to the source string exactly and in
+order, not by trusting the in-memory report. **7/7 PASS** on `verify_art.py`
+under kicad-cli 10.0.0, with `F.Cu` narrowest feature 0.100 mm — dead on the
+floor. The mask is **one** opening over the whole block, never per glyph; the
+mark is drawn by the copper.
+
+### The smallest cap height is `floor / D`, and it needs a matching stroke ratio
+
+Both constraints are linear in cap, so they cross: stroke-limited at
+`cap ≥ floor/r`, counter-limited at `cap ≥ floor/(2D − r)`, equal at **r = D
+exactly**, giving `cap = floor/D` as the global minimum over every stroke ratio.
+The binding glyph was looked up in the text actually being set (36 distinct
+characters) and is lowercase **`'e'`, D = 0.14744 em**, as the palette predicted.
+So `0.100 / 0.14744 = 0.6782 mm`, a 1:6.782 ratio, inside the palette's 1:8–1:6
+band. Verified empirically: **0.6782 mm is refused** (stroke 0.09999 mm) and
+**0.6783 mm emits**, with stroke and counter both landing on 0.1000 mm.
+
+This does not happen at the tool's default 1:6.7 ratio, and the distinction
+matters for anyone reproducing the number: at the default the same body is
+**counter**-limited and refused below **0.695 mm**. The part is emitted with
+`--stroke-ratio 0.14744` — D passed as the ratio.
+
+Legibility is the honest part. x-height at that cap is **0.452 mm**, roughly 2.5–3
+pt. This is loupe text, which is what microprinting means. And the 0.100 mm floor
+sits between vendor tiers: at r = D each tier's minimum cap is just `floor/D`, so
+a **standard 5-mil fab cannot build this part** (needs 0.8614 mm), a 0.09 mm
+advanced fab can (0.6104 mm), and at 0.075 mm capability fab stops binding and
+legibility takes over at 0.600 mm. A coarser fab does not scale the mark by the
+cap ratio — the flow re-breaks at every span, so the shape has to be re-sized and
+the run repeated.
+
+### The render driver was plotting with whatever `kicad-cli` was on PATH
+
+`tools/board_render.py` recombines the plotted layers through this palette's own
+decision tree, so a figure shows what the board will look like rather than
+KiCad's editor colours. It was found resolving a bare `"kicad-cli"` from PATH —
+which on this machine finds a distro **7.0.11** that cannot parse file format
+20241229, and which had already silently rendered one microprint figure with
+KiCad 7 stroke metrics. It now resolves through `verify_art.find_kicad_cli` with
+a hard gate at major ≥ 10 and prints the version it chose.
+
+The three figures in `docs/images/btc_whitepaper_b_*.png` were re-derived from the
+committed part under **kicad-cli 10.0.0** and all three came back
+**pixel-identical** to the files on disk, so their provenance is established
+rather than assumed: no KiCad 7 plot survives in them. Each carries its own caveat on the image: `fp export svg`
+emits nothing for `In1.Cu`, so T4 renders as T3 and T7 as T5.
+
+### Not landing this pass
+
+`tools/fab_profiles.py` — vendor geometry limits and per-mask-colour tone anchors
+— is **held back**, not committed. It is imported by nothing and tested by
+nothing; its `tone_anchors("black")` set disagrees with `w0_spike.TONES`, the
+anchors this repo's quantiser and render driver actually use, giving
+T6 − T5 = 4.0 L\* where the established set gives 7.9 and T4 (112, 102, 79)
+against (170, 150, 105); and its own comment's tone-ordering table does not
+reproduce from the code in the same file — for purple and for white-mask /
+black-silk the computed order is the reverse of what the comment states. The one
+finding worth keeping from it *is* kept, in the palette under **The tone anchors
+are a BLACK-mask set**: on a light mask the ordering inverts, which the halftone
+ramp's L\* gate does not handle, so issue **#1** needs a coupon per mask colour
+rather than one coupon.
+
+Nothing committed this pass either; all of it is in the working tree.
