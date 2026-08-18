@@ -18,3 +18,41 @@ coupon_out/
 # stay local. Regenerate with tools/prep_assets.py.
 assets/
 !assets/normalised/bitcoin_emission_formula.svg
+
+# Generated footprint libraries. Every footprint build_library.py installs is
+# DERIVED FROM a source image, this repo is public and heading for GPLv3 /
+# CERN-OHL-S, and library/ is the natural in-repo target -- so everything
+# under it is ignored by default. build_library.py refuses -o inside a working
+# tree that does not ignore it, and these lines are what makes the documented
+# in-repo target legal for it.
+#
+# The two exceptions are the hand-made footprints this repo really does track:
+# art_hex_asic_window (tools/texture_board.py) and art_btc_whitepaper_b
+# (tools/microtext.py). Neither is reproducible by build_library.py. To track
+# a further one deliberately, add another '!' line for it by name -- a blanket
+# re-include of *.kicad_mod would start committing generated art.
+library/*
+!library/RecklessArt.pretty/
+library/RecklessArt.pretty/*
+!library/RecklessArt.pretty/art_hex_asic_window.kicad_mod
+!library/RecklessArt.pretty/art_btc_whitepaper_b.kicad_mod
+
+# Colour renders of source artwork. build_library.py no longer writes any --
+# round 4 removed the feature outright -- but `emit_art.py --preview` still
+# does, on demand, and a preview is a clean recognisable render of the SOURCE
+# art: a verifier opened AdvLib.pretty.previews/satoshi_points_20mm.png and
+# identified the MFB character from it. Consent to place the mark on a board
+# is not permission to redistribute the art.
+*.previews/
+
+# build_library.py needs NO RULE HERE. It creates no working directory in this
+# tree at all: every piece is emitted to a unique temporary file in the SYSTEM
+# temporary directory, verified there, and installed with one os.replace. The
+# only thing it ever writes into the library besides footprints is a
+# cross-device install temporary that is unlinked in the same call.
+#
+# Rounds 2-4 each moved a NAMED, PERSISTENT staging directory somewhere new,
+# and each new home came with its own destruction path. A dot-prefixed
+# working-directory rule lived here, and in SatoshiStarter, only because the
+# tool insisted on leaving directories in somebody's repo. Round 5 removed
+# the subsystem instead, and the rule went with it.
