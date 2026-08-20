@@ -235,6 +235,12 @@ GLYPHS: dict[str, tuple[float, tuple[float, float, float, float] | None,
     '|':  (0.95238, ( 0.47948, -0.63288,  0.47948,  0.79569), None),
     '}':  (0.66667, ( 0.14615, -0.68050,  0.47948,  0.84331), None),
     '~':  (0.71429, ( 0.09853, -0.01383,  0.57472,  0.08141), None),
+    # Beyond printable ASCII. Only characters this project actually sets are
+    # added, and only after the same rig has re-measured the ASCII table and
+    # reproduced it exactly -- see the provenance note on GLYPH_PATHS.
+    '·': (0.76190, ( 0.33662,  0.03379,  0.43186,  0.12903), None),
+    'α': (1.00000, ( 0.19377, -0.20431,  0.86043,  0.46236), 0.24819),
+    'β': (0.90476, ( 0.14615, -0.53764,  0.71758,  0.79569), 0.23809),
 }
 
 # Derived from the table, not asserted independently. The capital ink box runs
@@ -347,7 +353,19 @@ class UnmeasuredGlyph(KeyError):
 # Provenance: kicad-cli 10.0.0 `fp export svg`, cap height 10 mm, stroke
 # CAL_STROKE_RATIO, one glyph per footprint with two reference fp_lines at
 # known coordinates to fix the plot origin -- the same rig calibrate() uses.
-# 95 printable ASCII glyphs, 146 chains, 788 segments, 934 points.
+# 95 printable ASCII glyphs, 146 chains, 788 segments, 934 points, plus three
+# characters this project sets outside ASCII -- U+00B7 MIDDLE DOT, U+03B1 GREEK
+# SMALL LETTER ALPHA, U+03B2 GREEK SMALL LETTER BETA -- measured on the same rig
+# on 2026-08-19: 98 glyphs, 150 chains, 834 segments, 984 points. The extraction
+# was validated before it was trusted: re-running it over all 95 ASCII glyphs
+# reproduced the segment multiset of every one of them (the chaining differs on
+# '*', '@', 'Q', 'Y' and 'y', where the plot walks a shared vertex in a
+# different order than the source did; the segments are identical), so the three
+# new rows come from a reader that is known to agree with the baked table.
+#
+# U+20BF BITCOIN SIGN is deliberately NOT here: KiCad 10.0.0 has no such glyph
+# and plots a 1 em x 1 em placeholder box for it -- 4 segments, no letterform.
+# Anything that needs it must draw it, not set it.
 GLYPH_PATHS: dict[str, tuple[tuple[tuple[float, float], ...], ...]] = {
     ' ':  (),
     '!':  (((0.241385,0.367121),(0.289004,0.414740),(0.241385,0.462359),
@@ -706,6 +724,24 @@ GLYPH_PATHS: dict[str, tuple[tuple[tuple[float, float], ...], ...]] = {
            (0.146146,-0.680498),),),
     '~':  (((0.098527,0.081407),(0.146146,0.033788),(0.241385,-0.013831),
            (0.431861,0.081407),(0.527099,0.033788),(0.574718,-0.013831),),),
+    # Beyond printable ASCII -- see the GLYPHS table above.
+    '·': (((0.384242,0.033788),(0.336623,0.081407),(0.384242,0.129026),(
+           0.431861,0.081407),(0.384242,0.033788),(0.384242,0.129026),),),
+    'α': (((0.812813,-0.204308),(0.669956,0.271883),(0.622337,0.367121),(
+           0.574718,0.414740),(0.479480,0.462359),(0.384242,0.462359),(
+           0.289004,0.414740),(0.241385,0.367121),(0.193765,0.224264),(
+           0.193765,0.033788),(0.241385,-0.109070),(0.289004,-0.156688),(
+           0.384242,-0.204308),(0.479480,-0.204308),(0.574718,-0.156688),(
+           0.622337,-0.109070),(0.669956,-0.013831),(0.717575,0.319502),(
+           0.765194,0.414740),(0.860432,0.462359),),),
+    'β': (((0.527099,-0.109070),(0.622337,-0.061450),(0.669956,-0.013831),(
+           0.717575,0.081407),(0.717575,0.271883),(0.669956,0.367121),(
+           0.622337,0.414740),(0.527099,0.462359),(0.384242,0.462359),(
+           0.289004,0.414740),(0.241385,0.367121),),((0.146146,0.795692),(
+           0.193765,0.748073),(0.241385,0.652835),(0.241385,-0.394784),(
+           0.289004,-0.490022),(0.384242,-0.537641),(0.527099,-0.537641),(
+           0.622337,-0.490022),(0.669956,-0.394784),(0.669956,-0.251927),(
+           0.622337,-0.156688),(0.527099,-0.109070),(0.431861,-0.109070),),),
 }
 
 # Half of KiCad's single-line text box, in em: what `justify top` and

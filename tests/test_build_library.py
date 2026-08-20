@@ -566,21 +566,31 @@ class TestT5:
         assert "F.SilkS" in f.read_text(encoding="utf-8")
         assert "INVERTED" in capsys.readouterr().out
 
-    def test_a_partial_t5_field_is_reported_as_a_number_never_guessed_at(
+    def test_a_partial_t5_field_is_reported_and_now_also_measured(
             self, tmp_path):
-        # MEASURED: reckless_color legitimately puts 63.7% of its opaque pixels
-        # on T5 and verifies PASS, while mfb_node_full sits at 11.9%. No
-        # threshold separates a real trap from correct art, so the tool reports
-        # the number and names the two flags.
+        # THIS TEST CHANGED, and the reason is the whole point of the fidelity
+        # metric. It used to assert exit 0, on the argument that no threshold
+        # separates a real trap from correct art -- reckless_color legitimately
+        # puts 63.7% of its opaque pixels on T5 and verifies PASS, while
+        # mfb_node_full sat at 11.9% and was mutilated. That argument was
+        # right about the T5 CENSUS and wrong about the question: the census
+        # counts pixels that landed on a tone, and what matters is whether the
+        # picture survived. tools/fidelity.py measures that directly by
+        # overlaying the emitted polygons on the source, and here it says half
+        # the artwork is not on the board. So the number is still reported, the
+        # two flags are still named -- and the piece no longer installs.
         d = tmp_path / "src"
         _png(d / "mixed.png", [((2, 2, 61, 20), BOARD), ((2, 22, 61, 37), SILK)])
         lib = lib_of(tmp_path)
-        assert run(d, "-o", lib, "--size", 10, "--no-verify") == 0
+        assert run(d, "-o", lib, "--size", 10, "--no-verify") == 1
         p = journal(lib)["pieces"][0]
         assert p["t5_px"] > 0
         assert 0 < p["t5_pct_of_opaque"] < 100
         assert any("T5 IS the board" in n for n in p["notes"])
         assert any("--silhouette-tone" in n for n in p["notes"])
+        assert any("FIDELITY" in x for x in p["problems"]), p["problems"]
+        assert p["fidelity"]["undrawn_pct"] > 40.0, p["fidelity"]
+        assert list(lib.glob("*.kicad_mod")) == []
 
     def test_allow_empty_cannot_be_smuggled_in_through_emit_arg(
             self, art, tmp_path, capsys):
@@ -614,18 +624,33 @@ class TestDroppedArea:
         assert rc == 1
         assert list(lib.glob("*.kicad_mod")) == []
         out = capsys.readouterr().out
-        assert "DROPPED-AREA BUDGET" in out
+        assert "SPECK-REMOVAL BUDGET (emitter-reported)" in out
+        # The rename is load-bearing: this budget reads `area_dropped` out of
+        # emit_art's own report, so it is the emitter's opinion of itself and
+        # must not be read as a fidelity number. tools/fidelity.py is what
+        # measures the picture, and it is a separate gate.
+        assert "not a fidelity measurement" in out
         assert "do not raise --max-dropped-pct" in out
         assert "Raise --size" in out
 
-    def test_under_budget_installs_and_lists_what_went(self, art, tmp_path):
+    def test_raising_the_speck_budget_does_not_buy_a_pass(self, art, tmp_path):
+        # The speck budget and the acceptance metric are INDEPENDENT gates, and
+        # this fixture proves they have to be. --max-dropped-pct 90 satisfies
+        # the emitter-reported budget outright; the overlay then measures 90 of
+        # 870 opaque source pixels with no polygon over them -- 10.3% of the
+        # picture missing -- and refuses it anyway. A budget flag cannot talk
+        # the fidelity metric out of what it measured.
         lib = lib_of(tmp_path)
         assert run(art / "specks.png", "-o", lib, "--size", 6, "--no-verify",
-                   "--max-dropped-pct", 90) == 0
+                   "--max-dropped-pct", 90) == 1
         p = journal(lib)["pieces"][0]
         assert p["dropped_regions"] > 0
         assert p["dropped_pct_of_ink"] > 0
         assert p["dropped"], "every dropped tone is listed, never merely allowed"
+        assert not any("SPECK-REMOVAL BUDGET" in x for x in p["problems"]), \
+            "the budget itself passed at 90%"
+        assert any("FIDELITY" in x for x in p["problems"]), p["problems"]
+        assert p["fidelity"]["undrawn_pct"] > 5.0, p["fidelity"]
 
     def test_min_area_none_drops_nothing(self, art, tmp_path):
         lib = lib_of(tmp_path)
@@ -1893,8 +1918,12 @@ class TestDroppedLine:
         # census, not the dropped count. The guard the design leans on hardest
         # printed a figure that meant something else.
         lib = lib_of(tmp_path)
+        # Exit 1, not 0: this fixture loses 10.3% of its ink and the fidelity
+        # metric now refuses it. What is being tested here is the REPORTING,
+        # and a piece that fails acceptance is exactly when the reporting has
+        # to be right -- so the lines are asserted on a failing run.
         assert run(art / "specks.png", "-o", lib, "--size", 6, "--no-verify",
-                   "--max-dropped-pct", 90) == 0
+                   "--max-dropped-pct", 90) == 1
         lines = [ln for ln in capsys.readouterr().out.splitlines()
                  if "DROPPED" in ln]
         assert lines, "the dropped tones must still be listed"

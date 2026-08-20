@@ -59,6 +59,7 @@ from lxml import etree
 # cluster lands nearest -- assignment proper is the quantiser's job.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from w0_spike import TONES, srgb_to_lab  # noqa: E402
+import palette as _palette                # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -116,6 +117,8 @@ MFB = ("Hardware Designs/1-ASIC Satoshi Starter/SatoshiStarter/ZIP - MFB Logos/"
        "Brand-Book-main/Badges/Nodes")
 MFB_WEB = ("Hardware Designs/1-ASIC Satoshi Starter/SatoshiStarter/"
            "ZIP - MFB Logos/from-website")
+MFB_LOGOS = ("Hardware Designs/1-ASIC Satoshi Starter/SatoshiStarter/"
+             "ZIP - MFB Logos/Brand-Book-main/Logos")
 
 # role:
 #   deliverable -- art we intend to convert
@@ -166,13 +169,50 @@ ASSETS = [
     dict(id="mfb_lockup_white", src=f"{MFB_WEB}/logo-mfb-white.svg", root="onedrive",
          role="deliverable", licence="third-party (My First Bitcoin) -- consent for SatoshiStarter, NOT redistributable",
          note="The official WHITE lockup from myfirstbitcoin.org, fetched "
-              "2026-08-17; see PROVENANCE.txt beside it. 32 paths, one fill "
-              "#F6F6F6, no strokes. MFB's identity is a white mark on a purple "
+              "2026-08-17; see PROVENANCE.txt beside it. 15 paths, one fill "
+              "#F6F6F6, no strokes -- svg_fill_inheritance below is the "
+              "measurement; an earlier hand-written '32 paths' here was wrong. "
+              "MFB's identity is a white mark on a purple "
               "field, so on the purple baseline this quantises to a single tone: "
               "T1 silk for the mark, T5 bare mask for the field, and the "
               "Bitcoin B is a KNOCKOUT hole in the silk band. The Brand-Book "
               "zip has no white vector lockup -- only raster PNG and an "
               "orange/near-black .ai."),
+    dict(id="mfb_lockup_3tone", src=f"{MFB_LOGOS}/Logo MPB Assets-10.png",
+         root="onedrive", role="deliverable",
+         licence="third-party (My First Bitcoin) -- consent for SatoshiStarter, NOT redistributable",
+         note="THE THREE-TONE LOCKUP, for the purple board. Same horizontal "
+              "lockup as mfb_lockup_white (bbox aspect 1.8743 vs the vector's "
+              "1.8746) but MFB's own two-colour colourway: orange band "
+              "#F7941F 46.1 %, white B + wordmark #FFFFFF 53.5 %, everything "
+              "else transparent. Against a transparent field that is THREE "
+              "board tones -- T2 ENIG for the band, T1 silk for the mark, T5 "
+              "bare purple mask for the field -- and only two of them are "
+              "drawn. Deliberately NOT 'Logo MPB Assets-2.png', the variant "
+              "whose wordmark is near-black #231F20: measured, that black "
+              "quantises to T5 (254,077 px, 38.9 % of the opaque artwork) and "
+              "T5 IS the board, so on Assets-2 the wordmark and the "
+              "background are the same tone and the words disappear. "
+              "Assets-10 is Assets-2 with the wordmark recoloured white -- "
+              "3 px differ across 1,310,115 -- so choosing it is MFB's own "
+              "recolour, not ours. sha256 e04c0624... ; archived in the "
+              "private SatoshiStarter repo at "
+              "art-assets/mfb/lockup/Logo MPB Assets-10.png."),
+    dict(id="mfb_lockup_black_wordmark",
+         src=f"{MFB_LOGOS}/Logo MPB Assets-2.png", root="onedrive",
+         role="control",
+         licence="third-party (My First Bitcoin) -- consent for SatoshiStarter, NOT redistributable",
+         note="CONTROL for the T5-erasure trap, and the reason "
+              "mfb_lockup_3tone uses Assets-10 instead. Same lockup, wordmark "
+              "in near-black #231F20 (38.9 %) rather than white. Measured "
+              "with w0_spike.quantise() at source resolution: Assets-10 -> "
+              "{T1: 348,481, T2: 296,627} and nothing else; Assets-2 -> "
+              "{T1: 94,322, T2: 296,618, T5: 254,077}. Those 254,077 T5 "
+              "pixels ARE the wordmark, and T5 draws no geometry, so the "
+              "words would be bare board -- the same tone as the transparent "
+              "field around them. Not a subtle contrast loss: the silhouette "
+              "is gone. Keep this registered so the claim stays re-derivable "
+              "rather than remembered."),
     dict(id="bitcoin_b", src="examples/bitcoin_b.svg", root="repo",
          role="deliverable", licence="public domain (Bitcoin logo)"),
 ]
@@ -736,7 +776,8 @@ def interior_mask(rgb: np.ndarray, ink: np.ndarray) -> np.ndarray:
 
 
 def colour_census(rgb: np.ndarray, ink: np.ndarray, delta_e: float,
-                  max_seed_colours: int = 512) -> dict:
+                  max_seed_colours: int = 512, *,
+                  mask: str = "black") -> dict:
     """Cluster ink colours in CIELAB and report area fractions.
 
     Perceptual clustering rather than exact matching, because the Reckless logo
@@ -790,19 +831,41 @@ def colour_census(rgb: np.ndarray, ink: np.ndarray, delta_e: float,
     area /= max(area.sum(), 1)
 
     order = np.argsort(-area)
-    tone_lab = srgb_to_lab(np.array([t[2] for t in TONES], dtype=np.uint8))
+    # THE TARGET COLOURWAY, not "the palette". T5 is literally the bare mask,
+    # so a purple board has a different T5 than a black one and every distance
+    # below moves with it. Defaults to black, which is what this file measured
+    # against before colourways existed.
+    pal = _palette.palette_for(mask, allow_provisional=True)
+    tone_lab = srgb_to_lab(np.array([pal[t].rgb for t in _palette.TONE_IDS],
+                                    dtype=np.uint8))
+    legible = list(pal.legible(allow_inner=False, allow_provisional=True))
+    l5 = pal.lstar(_palette.BACKGROUND_TONE)
     clusters = []
     for rank, i in enumerate(order):
         c = centroids_rgb[i]
-        nearest = int(np.argmin(((centroid_lab[i] - tone_lab) ** 2).sum(-1)))
+        d = ((centroid_lab[i] - tone_lab) ** 2).sum(-1)
+        nearest = int(np.argmin(d))
+        nid = _palette.TONE_IDS[nearest]
+        # Three classifications the emit path needs BEFORE anything is emitted.
+        # An ink whose nearest tone DRAWS NOTHING is not "hard to match", it is
+        # UNREPRESENTABLE: on a dark-mask board T5 is the darkest tone the
+        # process makes, and ink below it has no anchor at all. Saying so here
+        # is the difference between a refusal at ingest and a missing limb on a
+        # delivered board.
+        lstar = pal.lstar_of_rgb([int(v) for v in c])
+        near_leg = (min(legible, key=lambda t: float(d[_palette.TONE_IDS.index(t)]))
+                    if legible else nid)
         clusters.append({
             "id": rank,
             "rgb": [int(v) for v in c],
             "hex": "#%02x%02x%02x" % tuple(int(v) for v in c),
             "lab": [round(float(v), 1) for v in centroid_lab[i]],
             "area_fraction": round(float(area[i]), 5),
-            "nearest_palette_tone": TONES[nearest][0],
-            "nearest_palette_tone_name": TONES[nearest][1],
+            "nearest_palette_tone": nid,
+            "nearest_palette_tone_name": pal[nid].name,
+            "nearest_legible_tone": near_leg,
+            "dl_to_board": round(float(lstar - l5), 2),
+            "blocked": bool(not pal[nid].emits),
             "_src_index": int(i),
         })
     return {
@@ -1012,6 +1075,40 @@ def build_warnings(entry, census, sizes):
                     f"at {100*c['area_fraction']:.1f} % area. Soft shadows do not "
                     f"survive quantisation -- delete it at ingest rather than "
                     f"letting it become a spurious tone.")
+
+    # --- THE INGEST GUARD ---------------------------------------------------
+    # Named here, before anything is emitted, because the alternative is a
+    # delivered board with a limb missing. An ink whose nearest tone DRAWS
+    # NOTHING is not a matching problem: on a dark-mask board T5 is the darkest
+    # tone the process can make, and the corpus blacks sit 28 L* below it, so
+    # no anchor represents them at all. Nearest-anchor assignment answers that
+    # by choosing the extremum, which is the tone that is the board.
+    blocked = [c for c in sig if c.get("blocked")]
+    if blocked:
+        lost = sum(c["area_fraction"] for c in blocked)
+        warn.append(
+            "UNREPRESENTABLE INK: " + ", ".join(
+                f"{c['hex']} ({100*c['area_fraction']:.1f} %, "
+                f"{c['dl_to_board']:+.1f} L* from the board)" for c in blocked)
+            + f" -- {100*lost:.1f} % of ink whose nearest tone is "
+              f"{blocked[0]['nearest_palette_tone']}, WHICH DRAWS NOTHING. "
+              f"Every tone this process makes is on the other side of the "
+              f"board from this ink. It will be erased outright unless a "
+              f"substitute is DECLARED: build_library --propose-tones writes "
+              f"the table, and the nearest legible tone here is "
+              + ", ".join(f"{c['hex']} -> {c['nearest_legible_tone']}"
+                          for c in blocked) + ".")
+
+    faint = [c for c in sig
+             if not c.get("blocked") and abs(c.get("dl_to_board", 99.0)) < 8.0]
+    if faint:
+        warn.append(
+            "INK THAT LANDS ON THE BOARD'S OWN LIGHTNESS: " + ", ".join(
+                f"{c['hex']} ({100*c['area_fraction']:.1f} %, "
+                f"{c['dl_to_board']:+.1f} L*)" for c in faint)
+            + " -- under 8 L* from the mask. tools/texture_board.py calls that "
+              "separation \"a sheen and not a graphic\". It would be drawn and "
+              "invisible.")
 
     tones = {c["nearest_palette_tone"] for c in sig}
     if len(tones) < len(sig):

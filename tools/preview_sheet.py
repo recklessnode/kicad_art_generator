@@ -28,12 +28,14 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from w0_spike import TONES                       # noqa: E402
 from coupon_blocks import TONE_RECIPE            # noqa: E402
 import verify_art as V                           # noqa: E402
+from board_render import palette_of, tone_rgb    # noqa: E402
 
-TONE_RGB = {t[0]: t[2] for t in TONES}
-TONE_DESC = {t[0]: t[1] for t in TONES}
+# Resolved from tools/palette.py, not copied out of w0_spike. See board_render.
+_DEFAULT_PAL = palette_of("")
+TONE_RGB = tone_rgb(_DEFAULT_PAL)
+TONE_DESC = {t.id: t.name for t in _DEFAULT_PAL.tones}
 BOARD = TONE_RGB["T5"]
 
 # recipe key "T1_silk" -> tone id "T1"

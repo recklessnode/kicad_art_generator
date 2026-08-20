@@ -223,12 +223,16 @@ if str(HERE) not in sys.path:
 
 import verify_art                                     # noqa: E402
 import fab_profiles                                   # noqa: E402
+import palette                                        # noqa: E402
+import tone_map                                       # noqa: E402
+import fidelity                                       # noqa: E402
 
 try:
     import tomllib
 except ModuleNotFoundError:                            # pragma: no cover
     tomllib = None
 
+TOOLS = HERE
 EMIT_ART = HERE / "emit_art.py"
 
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".svg")
@@ -236,6 +240,14 @@ SIDECAR_NAME = "artlib.toml"
 SIDECAR_SCHEMA = 1
 DEFAULT_SIZE_MM = 20.0
 DEFAULT_MAX_DROPPED_PCT = 1.0
+# A tone that emitted no polygons at all fails only once it was a REGION of the
+# design. MEASURED need for the threshold: the purple rebuild refused
+# mfb_lockup_3tone over "T3 (181 px) -> 0 polygons", which is 0.03% of its ink
+# -- the antialias residue between the white and the orange. 0.5% is an order
+# of magnitude above that and two below the smallest deliberate region in the
+# corpus (satoshi_points' red accent at 0.42%... which is why it is DECLARED
+# rather than left to be dropped).
+DROPPED_TONE_FAIL_PCT = 0.5
 MIN_KICAD_MAJOR = verify_art.MIN_KICAD_MAJOR
 
 # emit_art stamps this into every (descr) it writes (emit_art.py:3581-3583).
@@ -298,6 +310,13 @@ RESERVED_EMIT_ARGS = {
     "--min-area-mm2": "use --min-area, or 'min_area' in the sidecar",
     "--descr": "use 'descr' in the sidecar",
     "--allow-empty": "build_library refuses a footprint with no geometry",
+    "--tone-map": "the map is 'tones' in the sidecar; this tool serialises it",
+    "--palette-mask": "the colourway is 'mask' in the sidecar",
+    "--ink-tone": ("declare the colour instead: 'tones' in the sidecar says "
+                   "which ink becomes which tone, and says it per colour. "
+                   "--ink-tone re-points whatever single tone the quantiser "
+                   "happened to choose, which is a different statement every "
+                   "time the palette moves -- and the palette moved"),
 }
 
 ADDED, UPDATED, UNCHANGED, FAILED = "ADDED", "UPDATED", "UNCHANGED", "FAILED"
@@ -517,8 +536,11 @@ def case_insensitive_fs(where: Path) -> bool | None:
 # sidecar
 # ---------------------------------------------------------------------------
 
-SECTION_KEYS = {"name", "sizes", "min_area", "emit", "descr"}
-DEFAULTS_KEYS = {"sizes", "min_area", "emit", "descr"}
+SECTION_KEYS = {"name", "sizes", "min_area", "emit", "descr",
+                "mask", "tones", "tol_de", "unmapped_budget_pct", "inner_ok",
+                "skip"}
+DEFAULTS_KEYS = {"sizes", "min_area", "emit", "descr",
+                 "mask", "tol_de", "unmapped_budget_pct", "inner_ok"}
 
 HELP_OPTIONS = """\
 build_library sidecar -- per-piece settings, TOML
@@ -570,9 +592,55 @@ Default location: artlib.toml in each SOURCE directory. Override with
     ["*.jpg"]                       # glob sections allowed
     emit = ["--smooth", "1.0"]      # JPEG is what emit_art's --smooth is for
 
+WHICH TONE EACH INK BECOMES -- 'mask' AND 'tones'
+    Not a colour preference. On a dark-mask board T5 (bare mask) is the DARKEST
+    tone the process can make, so source ink darker than the board cannot be
+    represented at all, and nearest-anchor assignment answers that impossibility
+    by choosing T5 -- which draws nothing. Measured on the library this tool
+    built before the change: satoshi_points lost 29.6% of its ink that way,
+    satoshi_little 24.6%, mfb_node_full 12.0%, mfb_node_light 14.5%. The legs,
+    the arms and the laurel wreath were simply absent.
+
+    A 'tones' table says what each source colour becomes. Anything not named is
+    UNMAPPED and the emit REFUSES past 'unmapped_budget_pct', printing the
+    orphan colours as a block you can paste back in. --propose-tones writes the
+    first draft of the table for you.
+
+        mask   = "purple"            # black | purple | green | white
+        tol_de = 10.0                # a pixel this close to a declared colour
+                                     # IS that colour (weighted Lab)
+        unmapped_budget_pct = 0.25   # refuse past this much undeclared ink
+        inner_ok = false             # allow T4/T7, which need In1.Cu
+
+        ["character.png"]
+        tones = [
+          { rgb = "#e0a040", tone = "T2" },                          # body
+          { rgb = "#c08830", tone = "T2", merge_ok = ["#e0a040"] },  # shading
+          { rgb = "#fefefe", tone = "T1" },                          # highlight
+          { rgb = "#010101", tone = "T6", off_palette = true },      # outline
+        ]
+
+    Per-ink keys, each of them an acknowledgement the tool will not make for you
+        tone         the tone id this colour becomes. Required.
+        merge_ok     other declared colours it may share that tone with. One
+                     finish means exactly ONE metal tone, so three golds really
+                     do become one T2 -- but that loses a distinction the
+                     artwork has, so it has to be named.
+        off_palette  the colour is 55+ weighted-Lab units from the tone. That
+                     is a substitution, not an approximation: the Reckless red
+                     renders as gold under every assignment there is.
+        legibility   "declared" -- the tone is under 8 L* from the board, i.e.
+                     drawn and invisible. tools/texture_board.py calls that
+                     separation "a sheen and not a graphic".
+        note         free text; it ends up in the report.
+
+    skip = true      exclude a source entirely, with the reason in a comment.
+
 KEYS
-    [defaults]  sizes, min_area, emit, descr
-    section     name, sizes, min_area, emit, descr
+    [defaults]  sizes, min_area, emit, descr, mask, tol_de,
+                unmapped_budget_pct, inner_ok
+    section     name, sizes, min_area, emit, descr, mask, tones, tol_de,
+                unmapped_budget_pct, inner_ok, skip
                 ('name' only in an EXACT-filename section: a glob 'name' would
                  hand the same footprint name to several sources)
 
@@ -664,7 +732,108 @@ def _norm_settings(where: str, data: dict, path: Path) -> dict:
             raise SidecarError(f"{path}: {where}: 'name' must be a non-empty "
                                f"string")
         out["name"] = data["name"]
+    if "mask" in data:
+        if not isinstance(data["mask"], str):
+            raise SidecarError(f"{path}: {where}: 'mask' must be a string")
+        try:
+            palette.palette_for(data["mask"])
+        except palette.PaletteError as e:
+            raise SidecarError(f"{path}: {where}: {e}") from None
+        out["mask"] = data["mask"].lower()
+    if "skip" in data:
+        if not isinstance(data["skip"], bool):
+            raise SidecarError(f"{path}: {where}: 'skip' must be true or false")
+        out["skip"] = data["skip"]
+    if "inner_ok" in data:
+        if not isinstance(data["inner_ok"], bool):
+            raise SidecarError(f"{path}: {where}: 'inner_ok' must be true or "
+                               f"false")
+        out["inner_ok"] = data["inner_ok"]
+    for k in ("tol_de", "unmapped_budget_pct"):
+        if k in data:
+            v = data[k]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                raise SidecarError(f"{path}: {where}: '{k}' must be a "
+                                   f"non-negative number, got {v!r}")
+            out[k] = float(v)
+    if "tones" in data:
+        out["tones"] = _norm_tones(data["tones"], f"{path}: {where}: 'tones'")
     return out
+
+
+_INK_KEYS = {"rgb", "tone", "merge_ok", "off_palette", "legibility", "note"}
+
+
+def _norm_tones(v, where: str) -> list[dict]:
+    """Validate a declared ink table before anything is emitted.
+
+    Everything here is checkable without loading the image, so it is checked
+    here: a typo in a tone id should be one line of output at parse time, not a
+    footprint that is missing an arm.
+    """
+    if not isinstance(v, list) or not v:
+        raise SidecarError(f"{where}: must be a non-empty list of "
+                           f"{{ rgb = \"#rrggbb\", tone = \"Tn\" }} tables")
+    rows, seen = [], {}
+    for i, r in enumerate(v):
+        at = f"{where}[{i}]"
+        if not isinstance(r, dict):
+            raise SidecarError(f"{at}: must be a table")
+        unknown = sorted(set(r) - _INK_KEYS)
+        if unknown:
+            raise SidecarError(
+                f"{at}: unknown key(s) {', '.join(unknown)}. Allowed: "
+                f"{', '.join(sorted(_INK_KEYS))}")
+        for req in ("rgb", "tone"):
+            if req not in r:
+                raise SidecarError(f"{at}: needs '{req}'")
+        try:
+            rgb = tone_map._hex_to_rgb(r["rgb"])
+        except tone_map.ToneMapError as e:
+            raise SidecarError(f"{at}: {e}") from None
+        h = tone_map.rgb_to_hex(rgb)
+        if h in seen:
+            raise SidecarError(
+                f"{at}: colour {h} is declared twice. Two rows for one colour "
+                f"cannot both apply, and which one wins would be an accident "
+                f"of ordering")
+        seen[h] = True
+        tid = str(r["tone"])
+        if tid not in palette.TONE_IDS:
+            raise SidecarError(f"{at}: tone {tid!r} is not a tone; known: "
+                               f"{' '.join(palette.TONE_IDS)}")
+        row = {"rgb": h, "tone": tid}
+        if "merge_ok" in r:
+            m = r["merge_ok"]
+            if not isinstance(m, list) or not all(isinstance(x, str) for x in m):
+                raise SidecarError(f"{at}: 'merge_ok' must be a list of hex "
+                                   f"colours")
+            row["merge_ok"] = [tone_map.rgb_to_hex(tone_map._hex_to_rgb(x))
+                               for x in m]
+        for k, ty in (("off_palette", bool), ("legibility", str),
+                      ("note", str)):
+            if k in r:
+                if not isinstance(r[k], ty):
+                    raise SidecarError(f"{at}: '{k}' must be "
+                                       f"{'true/false' if ty is bool else 'a string'}")
+                row[k] = r[k]
+        if row.get("legibility", "") not in ("", "declared"):
+            raise SidecarError(
+                f"{at}: 'legibility' is either absent or the exact word "
+                f"\"declared\"; got {row['legibility']!r}")
+        rows.append(row)
+    named = set(seen)
+    for row in rows:
+        for m in row.get("merge_ok", []):
+            if m not in named:
+                raise SidecarError(
+                    f"{where}: {row['rgb']} lists merge_ok = {m}, which is not "
+                    f"a declared colour in the same table. A merge can only be "
+                    f"permitted between two colours this table actually names")
+    # T4/T7 need In1.Cu and are refused per piece rather than here, because the
+    # 'inner_ok' that permits them is resolved with the rest of the settings and
+    # a message naming the flag has to be able to see the flag.
+    return rows
 
 
 def _norm_min_area(v, where: str) -> str:
@@ -867,6 +1036,31 @@ class Piece:
     emit_args: list[str]
     descr: str | None
     sidecars: list[str]
+    mask: str = "black"
+    tone_map: dict | None = None      # tone_map.ToneMap.to_dict() shape
+    allow_inner: bool = False
+    allow_provisional: bool = False
+
+    @property
+    def raster_width(self) -> int:
+        """The raster width emit_art will actually use for this piece."""
+        args = list(self.emit_args)
+        for i, t in enumerate(args):
+            if t == "--raster-width" and i + 1 < len(args):
+                try:
+                    return int(args[i + 1])
+                except ValueError:
+                    break
+            if t.startswith("--raster-width="):
+                try:
+                    return int(t.split("=", 1)[1])
+                except ValueError:
+                    break
+        return 1200
+
+    @property
+    def crop(self) -> bool:
+        return "--no-crop" not in self.emit_args
 
 
 @dataclass
@@ -898,6 +1092,7 @@ class Result:
     prev_mtime: str | None = None
     emit_warnings: list[str] = field(default_factory=list)
     staged: Path | None = None
+    fidelity: dict | None = None
 
     @property
     def t5_pct(self) -> float:
@@ -951,6 +1146,21 @@ def run_emit(piece: Piece, out_file: Path, report_file: Path,
            "--name", piece.name,
            "-o", str(out_file),
            "--report-json", str(report_file)]
+    cmd += ["--palette-mask", piece.mask]
+    if piece.tone_map is not None:
+        # Serialised beside the staged footprint, in the stage this run owns.
+        # The DIGEST of it goes into the footprint's tags, so a part and the
+        # table it was assigned under can be checked against each other later
+        # without either of them being trusted to describe the other.
+        tm_file = report_file.with_name(report_file.name.replace(
+            ".report.json", ".tonemap.json"))
+        tm_file.write_text(json.dumps(piece.tone_map, indent=1),
+                           encoding="utf-8")
+        cmd += ["--tone-map", str(tm_file)]
+        if piece.allow_inner:
+            cmd += ["--allow-inner"]
+        if piece.allow_provisional:
+            cmd += ["--allow-provisional"]
     if piece.min_area == "auto":
         cmd += ["--min-area-mm2", "auto", "--allow-dropped-tones"]
     elif piece.min_area == "none":
@@ -1226,6 +1436,23 @@ def build_parser() -> argparse.ArgumentParser:
                         "monochrome-on-background (verified: exit 2, nothing "
                         "written). It is always reported as INVERTED and "
                         "recorded in the footprint's descr")
+    c.add_argument("--palette-mask", default=None, metavar="COLOUR",
+                   help="mask colour every piece in this run is assigned "
+                        "against, overriding 'mask' in the sidecar. black "
+                        "(default), purple, green, white. The colourway is "
+                        "written into each footprint's tags, so verify_art "
+                        "checks the part against the same one it was built for")
+    c.add_argument("--propose-tones", action="store_true",
+                   help="DO NOT BUILD. For each source, census its colours "
+                        "against the target palette and print a paste-ready "
+                        "[section] with a 'tones' table, the share of ink each "
+                        "colour carries, its L*, and how far the tone it would "
+                        "land on sits from the board. EXITS 3 if any cluster's "
+                        "nearest tone is T5 -- which draws nothing, so that "
+                        "colour would be erased -- if two colours 10 dE apart "
+                        "would share a tone, or if any binding lands under the "
+                        "20 L* worth-doing line. Writes no image and no "
+                        "footprint")
 
     n = ap.add_argument_group("naming")
     n.add_argument("--prefix", default="", metavar="STR",
@@ -1329,6 +1556,155 @@ class Usage(Exception):
     """Exit 2: usage, sidecar or environment. Nothing was built."""
 
 
+PROPOSE_MIN_SHARE_PCT = 0.1
+
+
+def _propose_tones(a, sources: list[Path], mask: str) -> int:
+    """Census each source against the target palette; print a paste-ready table.
+
+    WRITES NOTHING. Not the sidecar, not an image, not a footprint -- the tool
+    writes no images at all and this is not the place to start.
+
+    EXITS 3 on any of three findings, because each of them means the table it
+    just printed would lose part of the picture if pasted unedited, and a
+    proposal that exits 0 while containing a hole is the same defect as a check
+    that cannot fail.
+    """
+    import numpy as np
+    from PIL import Image
+    sys.path.insert(0, str(TOOLS))
+    import prep_assets
+    from emit_art import crop_to_content, rasterise_svg
+
+    pal = palette.palette_for(mask, allow_provisional=True)
+    front = [t for t in pal.drawable(allow_inner=False, allow_provisional=True)]
+    legible = [t for t in front
+               if abs(pal.dl_to_board(t)) >= palette.LEGIBLE_MIN_DL]
+    w = sys.stdout.write
+    w(f"# --propose-tones against {pal.tag()}\n")
+    w(f"# board (T5) L* {pal.lstar('T5'):.2f}.  front-side tones, dL from board:\n")
+    for t in front:
+        w(f"#   {t} {pal[t].name:<18} L* {pal.lstar(t):6.2f}  "
+          f"dL {pal.dl_to_board(t):+6.2f}"
+          f"{'  PROVISIONAL' if pal[t].provenance == 'PROVISIONAL' else ''}"
+          f"{'' if t in legible else '   <- UNDER the ' + format(palette.LEGIBLE_MIN_DL, 'g') + ' L* legibility line'}\n")
+    w("\n")
+
+    findings = 0
+    for src in sources:
+        if src.suffix.lower() == ".svg":
+            img, _tool = rasterise_svg(src, 1200)
+        else:
+            img = Image.open(src).convert("RGBA")
+        img, _box = crop_to_content(img)
+        arr = np.asarray(img.convert("RGBA"))
+        rgb, ink = arr[..., :3], arr[..., 3] >= 128
+        cen = prep_assets.colour_census(rgb, ink, tone_map.DEFAULT_TOL_DE)
+        w(f'["{src.name}"]\n')
+        w(f"# soft-edge pixels {cen['soft_pixel_fraction']:.3f} of ink; "
+          f"{int(ink.sum()):,} opaque px\n")
+        w("tones = [\n")
+        seen_tone: dict[str, list] = {}
+        for c in cen["clusters"]:
+            share = 100.0 * c["area_fraction"]
+            if share < PROPOSE_MIN_SHARE_PCT:
+                continue
+            crgb = tuple(int(v) for v in c["rgb"])
+            d = {t: float(np.linalg.norm(
+                tone_map._weighted(np.array(pal[t].rgb, dtype=np.uint8))
+                - tone_map._weighted(np.array(crgb, dtype=np.uint8))))
+                for t in palette.TONE_IDS}
+            near_any = min(d, key=d.get)
+            pick = min(legible, key=d.get) if legible else near_any
+            extra = []
+            if not pal[near_any].emits:
+                findings += 1
+                w(f"  # !! {c['hex']} is NEAREST {near_any}, WHICH DRAWS "
+                  f"NOTHING -- {near_any} IS THE BOARD. Under nearest-anchor "
+                  f"assignment this\n"
+                  f"  #    colour is erased outright ({share:.2f}% of the ink, "
+                  f"L* {pal.lstar_of_rgb(crgb):.1f}, {abs(pal.lstar_of_rgb(crgb) - pal.lstar('T5')):.1f} L* "
+                  f"from the board).\n"
+                  f"  #    Every tone this process can make is lighter than "
+                  f"this ink. Choose a substitute and say so.\n")
+            if d[pick] >= tone_map.OFF_PALETTE_DE:
+                extra.append("off_palette = true")
+            if abs(pal.dl_to_board(pick)) < palette.LEGIBLE_WARN_DL:
+                findings += 1
+                w(f"  # !! {c['hex']} -> {pick} is only "
+                  f"{abs(pal.dl_to_board(pick)):.1f} L* from the board, under "
+                  f"the {palette.LEGIBLE_WARN_DL:g} L* worth-doing line "
+                  f"(emit_art.HALFTONE_MIN_DELTA_L).\n")
+                if abs(pal.dl_to_board(pick)) < palette.LEGIBLE_MIN_DL:
+                    extra.append('legibility = "declared"')
+            prev = seen_tone.setdefault(pick, [])
+            merge = ""
+            if prev:
+                sep = min(float(np.linalg.norm(
+                    tone_map._weighted(np.array(crgb, dtype=np.uint8))
+                    - tone_map._weighted(np.array(
+                        tone_map._hex_to_rgb(p), dtype=np.uint8))))
+                    for p in prev)
+                if sep >= tone_map.DEFAULT_TOL_DE:
+                    findings += 1
+                    w(f"  # !! {c['hex']} and {prev[0]} are {sep:.1f} units "
+                      f"apart and would BOTH be {pick}. One finish means "
+                      f"exactly one metal\n"
+                      f"  #    tone (docs/pcb-palette.md line 145), so this may "
+                      f"be right -- but the board loses a distinction the art "
+                      f"has.\n")
+                merge = ", merge_ok = [" + ", ".join(
+                    f'"{p}"' for p in prev) + "]"
+            prev.append(c["hex"])
+            tail = (", " + ", ".join(extra)) if extra else ""
+            w(f'  {{ rgb = "{c["hex"]}", tone = "{pick}"{merge}{tail} }},'
+              f'   # {share:.2f}% of ink, L* {pal.lstar_of_rgb(crgb):.1f}, '
+              f'{d[pick]:.0f} units from {pick}\n')
+        w("]\n\n")
+    if findings:
+        w(f"# {findings} finding(s) above. Exit 3: this table would lose part "
+          f"of the picture if pasted unedited.\n")
+    return 3 if findings else 0
+
+
+def _resolve_tone_map(src: Path, settings: dict, mask: str
+                      ) -> tuple[dict | None, bool, bool]:
+    """-> (serialisable tone map or None, allow_inner, allow_provisional).
+
+    A source with no 'tones' table gets None and emit_art falls back to
+    nearest-anchor assignment, which is what every piece built before this
+    change used. That fallback is only correct for art drawn in the colours the
+    board can make; --propose-tones exists to find out whether it is.
+    """
+    rows = settings.get("tones")
+    if not rows:
+        return None, False, False
+    inner_ok = bool(settings.get("inner_ok", False))
+    pal = palette.palette_for(mask, allow_provisional=True)
+    need_inner = sorted({r["tone"] for r in rows if pal[r["tone"]].inner})
+    if need_inner and not inner_ok:
+        raise Usage(
+            f"{src.name}: tones bind ink to {', '.join(need_inner)}, whose "
+            f"recipe reaches In1.Cu. The piece stops being renderable on a "
+            f"2-layer board and costs a layer to show a colour. Set "
+            f"inner_ok = true for this source if that is the intent.")
+    need_prov = sorted({r["tone"] for r in rows
+                        if pal[r["tone"]].provenance == "PROVISIONAL"})
+    d = {
+        "mask": mask,
+        "tol_de": float(settings.get("tol_de", tone_map.DEFAULT_TOL_DE)),
+        "unmapped_budget_pct": float(settings.get(
+            "unmapped_budget_pct", tone_map.DEFAULT_UNMAPPED_BUDGET_PCT)),
+        "inner_ok": inner_ok,
+        "source": src.name,
+        "tones": rows,
+    }
+    # Round-trip it now so a malformed table is a parse error here rather than
+    # a subprocess failure per size.
+    tone_map.ToneMap.from_dict(d)
+    return d, inner_ok, bool(need_prov)
+
+
 def _plan(a, out: dict, exclude: list[Path]
           ) -> tuple[list[Piece], list[Sidecar], list[str], Found]:
     found = discover(a.sources, a.recursive, exclude)
@@ -1372,19 +1748,30 @@ def _plan(a, out: dict, exclude: list[Path]
     notes: list[str] = []
     for src in files:
         settings, used = resolve_settings(src, sidecars)
+        if settings.get("skip"):
+            notes.append(f"{src.name}: skip = true in the sidecar -- excluded")
+            for sc in sidecars:
+                for s in sc.sections:
+                    if s.exact and s.pattern == src.name:
+                        s.used = True
+            continue
         sizes = [float(x) for x in a.size] if a.size else \
             settings.get("sizes", [DEFAULT_SIZE_MM])
         min_area = a.min_area if a.min_area is not None else \
             settings.get("min_area", "auto")
         emit = list(a.emit_arg) + list(settings.get("emit", []))
         base = settings.get("name") or src.stem
+        mask = (a.palette_mask or settings.get("mask") or "black").lower()
+        tmap, inner, prov = _resolve_tone_map(src, settings, mask)
         try:
             nm = slug(a.prefix + base, a.allow_unicode_names)
             for size in sizes:
                 full = f"{nm}_{size_suffix(size)}"
                 check_reserved(full)
                 pieces.append(Piece(src, float(size), full, min_area, emit,
-                                    settings.get("descr"), used))
+                                    settings.get("descr"), used,
+                                    mask=mask, tone_map=tmap,
+                                    allow_inner=inner, allow_provisional=prov))
         except NameError_ as e:
             raise Usage(f"{src}: {e}") from None
 
@@ -1557,13 +1944,39 @@ def _guard(res: Result, a) -> None:
             "the worst failure mode here")
     if res.dropped_pct > a.max_dropped_pct:
         res.problems.append(
-            f"DROPPED-AREA BUDGET: --min-area removed {res.dropped_pct:.3f}% "
-            f"of the inked area ({res.dropped_mm2:.6f} of {res.ink_mm2:.4f} "
-            f"mm2, {res.dropped_regions} region(s)), over the "
-            f"{a.max_dropped_pct:g}% budget. Across this corpus speck removal "
-            f"costs 0.000-0.44%; a loss this size is real artwork. Raise "
-            f"--size for this piece, or set min_area for it in the sidecar -- "
-            f"do not raise --max-dropped-pct")
+            f"SPECK-REMOVAL BUDGET (emitter-reported): --min-area removed "
+            f"{res.dropped_pct:.3f}% of the inked area ({res.dropped_mm2:.6f} "
+            f"of {res.ink_mm2:.4f} mm2, {res.dropped_regions} region(s)), over "
+            f"the {a.max_dropped_pct:g}% budget. THIS READS `area_dropped` OUT "
+            f"OF THE EMITTER'S OWN REPORT and is therefore not a fidelity "
+            f"measurement -- it says what the emitter believes it discarded, "
+            f"not what is missing from the picture; tools/fidelity.py measures "
+            f"that independently and is checked separately. Across this corpus "
+            f"speck removal costs 0.000-0.44%; a loss this size is real "
+            f"artwork. Raise --size for this piece, or set min_area for it in "
+            f"the sidecar -- do not raise --max-dropped-pct")
+    # A FULLY dropped tone, judged by AREA rather than by the fact of it. The
+    # old guard failed on the fact alone, which refused mfb_lockup_3tone over
+    # "T3 (181 px) -> 0 polygons" -- 0.03% of the ink, i.e. antialias residue.
+    # A tone that WAS a region of the design is a different event from a tone
+    # that was a rounding error, and one number tells them apart.
+    for t in res.dropped_tones:
+        if not t.get("tone_lost_entirely"):
+            continue
+        share = (100.0 * t["tone_total_px"] / res.opaque_px) if res.opaque_px else 0.0
+        t["share_pct"] = round(share, 4)
+        if share >= DROPPED_TONE_FAIL_PCT:
+            res.problems.append(
+                f"TONE LOST ENTIRELY: {t['tone']} carried {t['tone_total_px']:,} "
+                f"px ({share:.3f}% of the ink) and emitted 0 polygons, over the "
+                f"{DROPPED_TONE_FAIL_PCT:g}% line. That is a region of the "
+                f"design, not a speck")
+        elif share > 0:
+            res.warnings.append(
+                f"tone lost entirely: {t['tone']} ({t['tone_total_px']:,} px, "
+                f"{share:.3f}% of the ink) emitted 0 polygons -- under the "
+                f"{DROPPED_TONE_FAIL_PCT:g}% line, so it is speck removal "
+                f"rather than lost artwork")
     # T5 is REPORTED, never guessed at. Measured: reckless_color legitimately
     # puts 63.7% of its opaque pixels on T5 (the black field of the logo, and
     # it verifies PASS), mfb_node_full sits at 11.9%, satoshi_miner at 19.2%.
@@ -1578,6 +1991,47 @@ def _guard(res: Result, a) -> None:
                 f"rather than background it has silently vanished; render it "
                 f"with `emit_art.py --preview` and look, then reach for "
                 f"--silhouette-tone or --ink-tone")
+
+
+def _fidelity(res: Result, staged: Path, rep: dict) -> None:
+    """The acceptance metric: does the picture survive?
+
+    This is the only check in the tool that does not read the emitter's opinion
+    of its own output. It rasterises the staged footprint from its OWN polygons
+    and overlays it, pixel-aligned, on the source file. verify_art passing is
+    not fidelity: every one of the four mutilated pieces in the shipped library
+    verified PASS or WARN while missing its limbs.
+    """
+    p = res.piece
+    try:
+        u = fidelity.undrawn_ink(p.source, staged, rep,
+                                 raster_width=p.raster_width, crop=p.crop)
+    except Exception as e:                                  # noqa: BLE001
+        res.problems.append(
+            f"FIDELITY NOT MEASURED: {type(e).__name__}: {e}. A piece whose "
+            f"acceptance metric could not be computed is not a piece that "
+            f"passed it")
+        return
+    res.fidelity = u
+    line = (f"undrawn source ink {u['undrawn_pct']:.3f}% "
+            f"({u['undrawn_px']:,} of {u['opaque_px']:,} opaque px), "
+            f"overdrawn {u['overdrawn_pct_of_ink']:.3f}% of ink")
+    if u["verdict"] == "FAIL":
+        res.problems.append(
+            f"FIDELITY: {line} -- at or over the "
+            f"{u['fail_at_pct']:g}% line. MEASURED BAND: every good footprint "
+            f"in this corpus lands in 0.185-2.310% and every mutilated one in "
+            f"11.964-29.551%; nothing has ever landed between. Ink this far "
+            f"undrawn is a part of the picture that is not on the board")
+    elif u["verdict"] == "WARN":
+        res.warnings.append(f"FIDELITY WARN: {line} (warn line "
+                            f"{u['warn_at_pct']:g}%)")
+    else:
+        res.notes.append(f"fidelity: {line}")
+    if u["inner_layers"]:
+        res.warnings.append(
+            f"NOT 2-LAYER RENDERABLE: geometry on {', '.join(u['inner_layers'])}. "
+            f"Only T4 and T7 need an inner layer, and both are opt-in")
 
 
 NOT_VERIFIED = "NOT VERIFIED"
@@ -2126,6 +2580,7 @@ def run(a) -> tuple[int, dict]:
                 staged = stage / f"{p.name}.kicad_mod"
                 res.staged = staged
                 _guard(res, a)
+                _fidelity(res, staged, e.report)
                 if not res.problems:
                     _verify(res, staged, cfg, a.no_verify)
 
@@ -2255,6 +2710,9 @@ def run(a) -> tuple[int, dict]:
         "dropped_mm2": round(r.dropped_mm2, 6),
         "ink_mm2": round(r.ink_mm2, 6),
         "dropped_pct_of_ink": round(r.dropped_pct, 5),
+        "mask": r.piece.mask,
+        "tone_map": r.piece.tone_map,
+        "fidelity": r.fidelity,
         "verify": r.verdict,
         "checks": r.checks,
         "problems": r.problems,
@@ -2487,6 +2945,42 @@ def main(argv=None) -> int:
     if "--help-options" in argv:
         sys.stdout.write(HELP_OPTIONS)
         return 0
+    if "--propose-tones" in argv:
+        # Intercepted before the main parser for the same reason
+        # --help-options is: this mode BUILDS NOTHING, so it must not require
+        # -o, must not probe a kicad-cli, and must not create a library
+        # directory as a side effect of being asked a question.
+        pp = argparse.ArgumentParser(add_help=False)
+        pp.add_argument("sources", nargs="*")
+        pp.add_argument("--propose-tones", action="store_true")
+        pp.add_argument("--palette-mask", default="black")
+        pp.add_argument("--recursive", action="store_true")
+        pp.add_argument("-o", "--output", default=None)
+        pa, unknown = pp.parse_known_args(argv)
+        if unknown:
+            sys.stderr.write(
+                f"\nbuild_library --propose-tones: it censuses sources and "
+                f"prints a table; it does not build, so it takes only SOURCE, "
+                f"--palette-mask and --recursive.\nUnrecognised here: "
+                f"{' '.join(unknown)}\n\n")
+            return 2
+        if not pa.sources:
+            sys.stderr.write("\nbuild_library --propose-tones: name at least "
+                             "one SOURCE image or directory\n\n")
+            return 2
+        found = discover(pa.sources, pa.recursive, [])
+        if found.errors:
+            sys.stderr.write("\nbuild_library: " + "\n".join(found.errors) + "\n\n")
+            return 2
+        if not found.files:
+            sys.stderr.write(f"\nbuild_library: no sources matched "
+                             f"({', '.join(IMAGE_EXT)})\n\n")
+            return 3
+        try:
+            return _propose_tones(pa, found.files, pa.palette_mask or "black")
+        except palette.PaletteError as e:
+            sys.stderr.write(f"\nbuild_library: {e}\n\n")
+            return 2
     ap = build_parser()
     a = ap.parse_args(argv)
     try:

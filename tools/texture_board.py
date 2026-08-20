@@ -2374,15 +2374,18 @@ def render_copper_png(board, lid, out_path, px_per_mm=20.0, bbox=None,
 # add-mode texture reads as a sheen and not as a graphic: T6 minus T5 is 19
 # counts of red. That small number IS the requirement -- "not visibly gold, and
 # just a board texture".
-TONE = {
-    "T1": (235, 235, 230),        # silk white
-    "T2": (205, 165, 75),         # ENIG gold: mask open over copper
-    "T3": (200, 180, 130),        # bare FR4: mask open, no copper
-    "T4": (170, 150, 105),        # mask open, buried copper only
-    "T5": (25, 25, 28),           # black mask, nothing under it -- IS the board
-    "T6": (44, 41, 36),           # mask over copper  <-- add-mode texture
-    "T7": (33, 32, 31),           # mask over buried copper
-}
+# Was a HAND-TYPED copy of the table, carrying a comment saying it was copied
+# "so this cannot drift". Three copies of one table is how it drifts.
+# Resolved from tools/palette.py now. Black by default, which is what
+# SatoshiStarter is -- and that is why T5 is (25, 25, 28) and why add-mode
+# texture reads as a sheen and not as a graphic: T6 minus T5 is 19 counts of
+# red, 7.87 L*. That small number IS the requirement here ("not visibly
+# gold, and just a board texture"), and it is the same number that makes
+# tools/fidelity.py refuse to call a tone that close to the board a drawn
+# graphic.
+import palette as _palette_mod                     # noqa: E402
+TONE = {t.id: tuple(t.rgb) for t in
+        _palette_mod.palette_for("black", allow_provisional=True).tones}
 OUTSIDE_RGB = (10, 10, 12)
 
 # Which layers make up a side's appearance.

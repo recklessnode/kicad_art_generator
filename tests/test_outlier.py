@@ -51,17 +51,23 @@ def test_tiled_layout_is_quiet():
 
 
 def test_real_library_frames_pass_geometry():
-    """The three pieces this fix was written for, if they have been rendered."""
+    """The three pieces this fix was written for, if they have been rendered.
+
+    Matched by PREFIX, not by full name. These three used to be pinned here at
+    _20mm, and when render_library moved them to the smallest size their silk
+    gaps actually clear at (reckless_mono 35 mm, both mfb_node badges 38 mm)
+    every pinned name stopped existing and this test went quietly to SKIP --
+    losing the coverage it was written to provide without failing. A prefix
+    follows the manifest wherever its sizes go.
+    """
     out = pathlib.Path(__file__).resolve().parents[1] / "output" / "RecklessArt.pretty"
-    names = ["reckless_mono_20mm", "mfb_node_light_20mm", "mfb_node_full_20mm"]
+    prefixes = ["reckless_mono", "mfb_node_light", "mfb_node_full"]
     seen = 0
-    for n in names:
-        p = out / f"{n}.kicad_mod"
-        if not p.exists():
-            continue
-        seen += 1
-        fp = V.load_footprint(p)
-        assert V._lone_outliers(fp, CFG) == [], f"{n} still reports an outlier"
+    for pre in prefixes:
+        for p in sorted(out.glob(f"{pre}_*mm.kicad_mod")):
+            seen += 1
+            fp = V.load_footprint(p)
+            assert V._lone_outliers(fp, CFG) == [], f"{p.stem} still reports an outlier"
     if not seen:
         import pytest
         pytest.skip("library not rendered yet")

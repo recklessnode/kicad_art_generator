@@ -65,9 +65,30 @@ _TOOLS = pathlib.Path(__file__).resolve().parent
 if str(_TOOLS) not in sys.path:
     sys.path.insert(0, str(_TOOLS))
 
-from w0_spike import TONES                                    # noqa: E402
+import palette as _palette                                    # noqa: E402
 
-TONE_RGB = {t[0]: t[2] for t in TONES}
+
+# ONE tone table, resolved from the footprint's own palette: tag. There used to
+# be three copies of this dict in the repo -- here, in preview_sheet.py, and a
+# hand-typed one in texture_board.py whose comment said it existed "so this
+# cannot drift", which is exactly how it would. A renderer that paints a purple
+# board in black-mask colours is not a cosmetic error: it is the picture
+# somebody looks at to decide the art came out right.
+def tone_rgb(pal=None) -> dict:
+    pal = pal or _palette.palette_for("black", allow_provisional=True)
+    return {t.id: tuple(t.rgb) for t in pal.tones}
+
+
+def palette_of(tags: str, fallback: str = "black"):
+    """The colourway a footprint states, or the pre-colourway default."""
+    try:
+        pal = _palette.from_tag(tags or "", allow_provisional=True)
+    except _palette.PaletteError:
+        pal = None
+    return pal or _palette.palette_for(fallback, allow_provisional=True)
+
+
+TONE_RGB = tone_rgb()
 
 # Layers pulled out of the plot. Order is irrelevant here -- the compositing
 # order is fixed in compose() -- but every one of these has to be asked for

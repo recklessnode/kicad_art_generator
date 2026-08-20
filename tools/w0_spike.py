@@ -179,10 +179,11 @@ def srgb_to_lab(rgb):
                      200 * (f[..., 1] - f[..., 2])], axis=-1)
 
 
-def _anchors_weighted():
+def _anchors_weighted(tones=None):
     """Palette anchors in the weighted Lab space the metric actually uses."""
     w = np.array([L_WEIGHT, 1.0, 1.0])
-    return srgb_to_lab(np.array([t[2] for t in TONES], dtype=np.uint8)) * w, w
+    tones = TONES if tones is None else tones
+    return srgb_to_lab(np.array([t[2] for t in tones], dtype=np.uint8)) * w, w
 
 
 def _squared_distances(P, A):
@@ -280,8 +281,20 @@ def quantise(img, min_alpha=128, smooth=0, *,
              mix=True, mix_ratio=MIX_RATIO, mix_max_res=MIX_MAX_RES,
              mix_split=MIX_SPLIT, mix_bias=MIX_BIAS,
              mix_support_frac=MIX_SUPPORT_FRAC,
-             mix_pair_penalty=MIX_PAIR_PENALTY, mix_edge=MIX_EDGE):
+             mix_pair_penalty=MIX_PAIR_PENALTY, mix_edge=MIX_EDGE,
+             tones=None):
     """Map every opaque pixel to its nearest tone. Returns (labels, mask, stats).
+
+    `tones` is the anchor table, in w0_spike.TONES shape, and defaults to the
+    black one so this function is byte-for-byte what it was. Pass
+    palette.Palette.as_w0_tones() to quantise against another colourway.
+
+    THIS IS THE PROPOSAL PATH, NOT THE EMIT PATH. Nearest-anchor assignment
+    cannot represent ink outside the range the process can make, and on a
+    dark-mask board it resolves that impossibility by choosing T5, which draws
+    nothing. tools/tone_map.py is what the emitter uses; this stays for
+    build_library --propose-tones and for the pieces genuinely drawn in the
+    colours of the board.
 
     Nearest in Lab, not RGB. The current tool asks 'is this pixel yellow or
     white?' and drops everything that is neither; this asks 'which of the seven
@@ -295,6 +308,7 @@ def quantise(img, min_alpha=128, smooth=0, *,
     `smooth` is a Gaussian pre-blur radius and now defaults to 0. It widens the
     blend band and erodes thin features; only reach for it on noisy sources.
     """
+    tones = TONES if tones is None else list(tones)
     img = img.convert("RGBA")
     if smooth:
         # Only for genuinely noisy input (JPEG ringing). This USED to run at
@@ -304,9 +318,9 @@ def quantise(img, min_alpha=128, smooth=0, *,
     rgb, alpha = arr[..., :3], arr[..., 3]
     opaque = alpha >= min_alpha
 
-    A, w = _anchors_weighted()
+    A, w = _anchors_weighted(tones)
     P = srgb_to_lab(rgb) * w
-    srgb_anchors = np.array([t[2] for t in TONES], dtype=np.float64)
+    srgb_anchors = np.array([t[2] for t in tones], dtype=np.float64)
 
     dsq = _squared_distances(P, A)
     near = np.argmin(dsq, axis=-1)                      # ties -> lowest index
@@ -316,7 +330,7 @@ def quantise(img, min_alpha=128, smooth=0, *,
     mixture_stats = {"enabled": bool(mix)}
 
     if mix:
-        nt = len(TONES)
+        nt = len(tones)
         rgbf = rgb.astype(np.float64)
 
         def flag(res):
@@ -350,10 +364,10 @@ def quantise(img, min_alpha=128, smooth=0, *,
 
         sel = is_mix & opaque
         changed = sel & (labels != naive)
-        pairs = Counter(f"{TONES[i][0]}~{TONES[j][0]}"
+        pairs = Counter(f"{tones[i][0]}~{tones[j][0]}"
                         for i, j in zip(pa[sel].ravel().tolist(),
                                         pb[sel].ravel().tolist()))
-        moves = Counter(f"{TONES[a][0]}->{TONES[b][0]}"
+        moves = Counter(f"{tones[a][0]}->{tones[b][0]}"
                         for a, b in zip(naive[changed].ravel().tolist(),
                                         labels[changed].ravel().tolist()))
         before = set(naive[opaque].ravel().tolist())
@@ -363,9 +377,9 @@ def quantise(img, min_alpha=128, smooth=0, *,
             "reassigned_px": int(changed.sum()),
             "pairs": dict(pairs.most_common()),
             "moves": dict(moves.most_common()),
-            "tones_eliminated": [TONES[i][0] for i in sorted(before - after)],
-            "established": [TONES[i][0] for i in range(nt) if penalty[i] == 0],
-            "support": {TONES[i][0]: int(support[i]) for i in range(nt)
+            "tones_eliminated": [tones[i][0] for i in sorted(before - after)],
+            "established": [tones[i][0] for i in range(nt) if penalty[i] == 0],
+            "support": {tones[i][0]: int(support[i]) for i in range(nt)
                         if support[i]},
             "params": {"mix_ratio": mix_ratio, "mix_max_res": mix_max_res,
                        "mix_split": mix_split, "mix_bias": mix_bias,
@@ -383,20 +397,21 @@ def quantise(img, min_alpha=128, smooth=0, *,
         "opaque_px": total,
         "assigned_px": sum(counts.values()),
         "dropped_px": total - sum(counts.values()),
-        "per_tone": {TONES[i][0]: n for i, n in sorted(counts.items())},
-        "per_tone_naive": {TONES[i][0]: n for i, n in
+        "per_tone": {tones[i][0]: n for i, n in sorted(counts.items())},
+        "per_tone_naive": {tones[i][0]: n for i, n in
                            sorted(Counter(naive[opaque].ravel().tolist()).items())},
         "mixture": mixture_stats,
     }
     return labels, opaque, stats
 
 
-def composite(labels, background="T5"):
+def composite(labels, background="T5", tones=None):
     """Render the quantised result as the board would look."""
-    bg = next(i for i, t in enumerate(TONES) if t[0] == background)
+    tones = TONES if tones is None else list(tones)
+    bg = next(i for i, t in enumerate(tones) if t[0] == background)
     out = np.zeros(labels.shape + (3,), dtype=np.uint8)
-    out[:, :] = TONES[bg][2]
-    for i, t in enumerate(TONES):
+    out[:, :] = tones[bg][2]
+    for i, t in enumerate(tones):
         out[labels == i] = t[2]
     return Image.fromarray(out, "RGB")
 

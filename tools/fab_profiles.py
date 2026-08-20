@@ -341,76 +341,57 @@ if __name__ == "__main__":
 # And the ordering INVERTS, which is the part that breaks code rather than eyes:
 #
 #   black  + white silk   T1 > T3 > T2 > T6 > T7 > T5
-#   purple + white silk   T1 > T3 > T2 > T5 > T7 > T6
+#   purple + white silk   T1 > T3 > T2 > T5 > T7 > T6     <-- SEE BELOW: this
+#         row is CONTRADICTED by measurement. tools/palette.py computes
+#         T1 > T3 > T2 > T4 > T6 > T7 > T5 on purple, i.e. T6 BRIGHTER than
+#         T5, not darker. The sign of T6-T5 on purple has never been measured
+#         and issue #6 carries the coupon that settles it; until then purple
+#         T4/T6/T7 are stamped PROVISIONAL and are opt-in.
 #   white  + BLACK silk   T5 > T7 > T6 > T3 > T2 > T1
 #
 # On a white board T1 goes from brightest tone to darkest, and T5 from darkest
 # to brightest. Anything that assumes "T1 is the light one" or "T5 is the dark
 # ground" -- including the halftone ramp's L* gate, which declines tones below
-# 20 L* -- makes the opposite decision there. Ask is_inverted() rather than
-# assuming.
+# 20 L* -- makes the opposite decision there. Ask palette.Palette.is_inverted()
+# rather than assuming.
 #
-# All values below except black are ESTIMATES. Black is the only set actually
-# measured (docs/pcb-palette.md). recklessnode/kicad_art_generator#1 exists to
+# CORRECTION, kept because this claim was load-bearing: black is NOT measured
+# either. docs/pcb-palette.md lines 194-198 say to "treat the appearance column
+# as ordinal -- T1 lightest, T5 darkest -- rather than as colorimetry", and
+# calls them "the ESTIMATED sRGB anchors the quantiser actually uses in
+# tools/w0_spike.py". Black is the only stackup that physically exists here and
+# whose ORDER is known; its sRGB values are estimates like the rest. recklessnode/kicad_art_generator#1 exists to
 # replace these, and it now needs a coupon per mask colour, not one coupon.
-MASK_DEFAULT_SILK = {
-    "black": "white",
-    "purple": "white",
-    "green": "white",
-    "red": "white",
-    "blue": "white",
-    "yellow": "black",
-    "white": "black",
-}
 
-_MASK_RGB = {
-    "black": (24, 24, 27),
-    "purple": (86, 48, 124),
-    "green": (19, 94, 60),
-    "white": (240, 240, 238),
-}
-_SILK_RGB = {"white": (238, 238, 232), "black": (30, 30, 32)}
-
-# Tones that do not depend on the mask: exposed metal and exposed substrate.
-_FIXED = {"T2": (198, 158, 72), "T3": (196, 176, 126)}
-
-
-def _luma(rgb: tuple[int, int, int]) -> float:
-    """Rough perceptual lightness, enough to order tones."""
-    r, g, b = (c / 255 for c in rgb)
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
-
-
-def tone_anchors(mask: str, silk: str | None = None) -> dict[str, tuple[int, int, int]]:
-    """Palette anchors for a mask/silk pair.
-
-    Mask-derived tones are shaded from the mask itself: copper under mask (T6)
-    reads darker than bare mask, buried copper (T7) less so. Those shading
-    factors are guesses and are exactly what the calibration coupon replaces.
-    """
-    mask = mask.lower()
-    if mask not in _MASK_RGB:
-        raise ValueError(f"no anchors for mask colour {mask!r}")
-    silk = (silk or MASK_DEFAULT_SILK.get(mask, "white")).lower()
-    m = _MASK_RGB[mask]
-    dark = 0.72 if _luma(m) > 0.25 else 1.35   # copper darkens a light mask, lifts a dark one
-    mid = (1 + dark) / 2
-    clamp = lambda v: max(0, min(255, int(round(v))))
-    out = dict(_FIXED)
-    out["T1"] = _SILK_RGB[silk]
-    out["T5"] = m
-    out["T6"] = tuple(clamp(c * dark) for c in m)
-    out["T7"] = tuple(clamp(c * mid) for c in m)
-    out["T4"] = tuple(clamp((a + b) / 2) for a, b in zip(_FIXED["T3"], out["T7"]))
-    return out
-
-
-def is_inverted(mask: str, silk: str | None = None) -> bool:
-    """True when T1 is darker than T5 -- the white-board case.
-
-    Callers with lightness-dependent logic must branch on this. The halftone
-    ramp is the known one: it ramps from T5 as background toward the tone, and
-    on an inverted board that direction is backwards.
-    """
-    t = tone_anchors(mask, silk)
-    return _luma(t["T1"]) < _luma(t["T5"])
+# THE TONE TABLE MOVED. `_MASK_RGB`, `_SILK_RGB`, `_FIXED`, `tone_anchors()`
+# and `is_inverted()` used to live here. They are now tools/palette.py, and
+# they were not moved for tidiness -- they were refuted.
+#
+#   * `tone_anchors` shaded T6/T7 off the mask with
+#         dark = 0.72 if _luma(m) > 0.25 else 1.35
+#     i.e. copper under mask was assumed to DARKEN a light mask and LIFT a dark
+#     one, branching on a guessed threshold. Green's mask luma is 0.2965, so
+#     green took the darken branch and the function returned T6 nearly 10 L*
+#     BELOW T5. docs/pcb-palette.md says the opposite for green in as many
+#     words: "T6 is visibly brighter than T5; the classic PCB look".
+#   * The prose ordering table a few lines above here claimed
+#     `purple + white silk  T1 > T3 > T2 > T5 > T7 > T6` (T6 darkest) while the
+#     code below it computed T6 BRIGHTEST. The module contradicted the palette
+#     doc on green and contradicted itself on purple.
+#   * Purple's mask luma is 0.2414, which is 0.0086 -- 3.4 % -- from the 0.25
+#     threshold. Scaling the purple mask RGB by 1.04 flips the whole dark-tone
+#     ordering. A guessed constant that close to a discontinuity is not a
+#     model, and parameterising it would only have made the guess configurable.
+#
+# tools/palette.py keeps the one shading direction with evidence behind it
+# (copper under mask LIFTS, on every mask), deletes the branch, and stamps
+# every value derived that way PROVISIONAL so nothing can be drawn in it
+# without somebody saying so on the command line.
+#
+#   from palette import palette_for
+#   pal = palette_for("purple")        # was tone_anchors("purple")
+#   pal.is_inverted()                  # was is_inverted("purple")
+#
+# MASK_DEFAULT_SILK moved with them; the note above about T1/T5 collapsing on a
+# white board is still true and is now enforced rather than described --
+# Palette.legible() will not return a tone within 8 L* of the board.

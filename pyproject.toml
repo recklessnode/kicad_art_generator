@@ -30,6 +30,24 @@ dependencies = [
   # the library is only reproducible with it, so it is named here rather than
   # left to whatever the host happens to have.
   "cairosvg>=2.7",
+  # tools/prep_assets.py imports lxml at module level -- it is the only parser
+  # here that keeps an SVG's internal DTD subset and namespace prefixes intact
+  # while rewriting fills, which is what the Illustrator exports need. It was
+  # undeclared, so `pip install -e .` produced a tree in which the INGEST stage
+  # would not start at all: assets/normalised/ could not be regenerated, and
+  # since render_library.py reads only from there, the library was
+  # reproducible only on a machine that happened to have lxml already. Same
+  # failure mode the numpy note above describes, one stage earlier.
+  "lxml>=5.0",
+  # tools/ink_measure.py -- the region measurement verify_art.py uses to check
+  # a whole .kicad_pcb: inscribed feature width, real gaps, and what an opening
+  # at the fabrication floor deletes. The import is GUARDED, so a tree without
+  # shapely still runs and the board ink check reports SKIP with a reason
+  # rather than a pass. It is declared here anyway for the same reason numpy
+  # and lxml are: a `pip install -e .` tree in which the one check that can see
+  # a sub-floor letterform always says "NOT MEASURED" is a tree whose board
+  # verification does not work.
+  "shapely>=2.0",
 ]
 
 [project.optional-dependencies]

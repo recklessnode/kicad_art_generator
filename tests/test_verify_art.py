@@ -461,6 +461,157 @@ def test_candidate_pairs_finds_everything_brute_force_finds():
 
 
 # --------------------------------------------------------------------------
+# 5. a cutout is not a board outline
+#
+# reference_extent accepted "exactly one closed Edge.Cuts loop" as a board
+# outline. A window part has exactly one closed loop too, and its art sits
+# OUTSIDE that loop by design -- so the extent check asked whether the art fits
+# inside the hole it frames, and every feature "escaped". art_hex_asic_window
+# escapes its own 12.18 mm hex cut by 1.894 to 2.230 mm across 12 features, and
+# is correct: the marks clear the routed edge by 0.5062 mm.
+#
+# It passed anyway, because it carries a courtyard and courtyards are consulted
+# first. That is luck, not correctness -- drop the courtyard and the same part
+# fails 12 times. The tests below pin both directions: the exemption fires for a
+# real cutout, and it does NOT fire for an outline with a genuine escape.
+# --------------------------------------------------------------------------
+
+def _hexagon(r, n=6):
+    return [(r * math.cos(math.tau * k / n), r * math.sin(math.tau * k / n))
+            for k in range(n)]
+
+
+def loop_lines(pts, layer="Edge.Cuts", w=0.05):
+    out = []
+    for a, b in V.edges_of(pts):
+        out.append(f'\t(fp_line (start {a[0]:.4f} {a[1]:.4f}) '
+                   f'(end {b[0]:.4f} {b[1]:.4f})\n'
+                   f'\t\t(stroke (width {w}) (type solid)) (layer "{layer}"))')
+    return "\n".join(out)
+
+
+def square_poly(cx, cy, s, layer="F.Cu"):
+    h = s / 2.0
+    pts = [(cx - h, cy - h), (cx + h, cy - h), (cx + h, cy + h), (cx - h, cy + h)]
+    xy = "".join(f"(xy {x:.4f} {y:.4f})" for x, y in pts)
+    return (f'\t(fp_poly (pts {xy}) (stroke (width 0) (type solid)) '
+            f'(fill solid) (layer "{layer}"))')
+
+
+def test_a_lone_edge_cuts_loop_the_art_surrounds_is_a_cutout(tmp_path):
+    """The bug, at minimum size: one hex cut, four marks outside it, no
+    courtyard. Every mark 'escapes' an outline that was never an outline."""
+    body = loop_lines(_hexagon(6.0)) + "\n" + "\n".join(
+        square_poly(x, y, 1.5) for x, y in
+        [(8.0, 0.0), (-8.0, 0.0), (0.0, 8.0), (0.0, -8.0)])
+    fp = V.load_footprint(write_fp(tmp_path, body))
+
+    ref, src = V.reference_extent(fp)
+    assert ref is None and src == "Edge.Cuts cutout", (ref, src)
+    assert len(V.cutout_loops(fp)) == 1
+
+    g = V.check_geometry(fp, cfg())
+    assert g.level == V.PASS, detail_text(g)
+    assert "escapes" not in detail_text(g).lower(), detail_text(g)
+    assert "cutout" in detail_text(g), detail_text(g)
+
+
+def test_the_cutout_is_measured_for_clearance_not_left_silent(tmp_path):
+    """Exempting the class from containment must not make it unmeasured. The
+    number that governs a window part is how close copper comes to the cut."""
+    body = loop_lines(_hexagon(6.0)) + "\n" + square_poly(8.0, 0.0, 1.5)
+    fp = V.load_footprint(write_fp(tmp_path, body))
+    g = V.check_geometry(fp, cfg())
+    hit = [d for d in g.details if "closest approach" in d]
+    assert hit, detail_text(g)
+    got = float(hit[0].split("closest approach of any filled area to the cut ")
+                [1].split(" mm")[0])
+    # _hexagon puts a VERTEX on +x at (6, 0); the square's near edge is at
+    # x = 8.0 - 1.5/2 = 7.25, so the binding pair is vertex-to-edge: 1.25 mm
+    assert math.isclose(got, 1.25, abs_tol=1e-6), got
+
+
+def test_a_real_board_outline_still_catches_an_escape(tmp_path):
+    """The exemption must not swallow the check it lives inside. Art INSIDE a
+    loop with one feature flung out is an outline with a defect, not a cutout."""
+    body = loop_lines(_hexagon(6.0)) + "\n" + "\n".join(
+        [square_poly(0.0, 0.0, 1.5), square_poly(2.0, 0.0, 1.5),
+         square_poly(20.0, 0.0, 1.5)])            # the runaway
+    fp = V.load_footprint(write_fp(tmp_path, body))
+
+    assert V.cutout_loops(fp) == [], "art sits inside the loop; not a cutout"
+    ref, src = V.reference_extent(fp)
+    assert src == "Edge.Cuts board outline", (ref, src)
+
+    g = V.check_geometry(fp, cfg())
+    assert g.level == V.FAIL, detail_text(g)
+    esc = [d for d in g.details if "ESCAPES EXTENT" in d]
+    assert len(esc) == 1, detail_text(g)
+    runaway = [i for i, _ in V.polys_of(fp)][2]   # item indices follow the 6 cut lines
+    assert f"#{runaway} " in esc[0], (runaway, esc[0])
+
+
+def test_one_feature_inside_the_hole_keeps_the_loop_an_outline(tmp_path):
+    """The exemption is all-or-nothing on purpose. If a single feature sits in
+    the hole, the loop is not something the art wholly surrounds, and the
+    escape check stays armed -- otherwise a part half in the window would buy
+    itself an exemption with its own defect."""
+    body = loop_lines(_hexagon(6.0)) + "\n" + "\n".join(
+        [square_poly(8.0, 0.0, 1.5), square_poly(-8.0, 0.0, 1.5),
+         square_poly(0.0, 0.0, 1.5)])             # intrudes into the cut
+    fp = V.load_footprint(write_fp(tmp_path, body))
+    assert V.cutout_loops(fp) == []
+    g = V.check_geometry(fp, cfg())
+    assert g.level == V.FAIL, detail_text(g)
+
+
+def test_a_courtyard_still_outranks_the_cutout_reasoning(tmp_path):
+    """Ordering is unchanged: a declared courtyard is still the reference when
+    there is one. This is what was masking the bug on the shipped part."""
+    body = (loop_lines(_hexagon(6.0)) + "\n"
+            + loop_lines(_hexagon(10.0), layer="F.CrtYd") + "\n"
+            + square_poly(8.0, 0.0, 1.5))
+    fp = V.load_footprint(write_fp(tmp_path, body))
+    ref, src = V.reference_extent(fp)
+    assert src == "courtyard", (ref, src)
+    g = V.check_geometry(fp, cfg())
+    assert g.level == V.PASS, detail_text(g)
+    # and the cutout is still reported, whichever reference won
+    assert "cutout" in detail_text(g), detail_text(g)
+
+
+def test_the_shipped_window_part_passes_without_its_courtyard(tmp_path):
+    """The regression, on the real part. Strip the courtyard that was hiding
+    the defect and the geometry check must still be clean."""
+    src = ROOT / "library" / "RecklessArt.pretty" / "art_hex_asic_window.kicad_mod"
+    if not src.is_file():
+        pytest.skip("window part not present")
+    text = src.read_text(encoding="utf-8")
+    fp_full = V.load_footprint(src)
+    assert V.check_geometry(fp_full, cfg()).level == V.PASS
+
+    # each item is three lines -- fp_line / stroke+layer / uuid -- and the
+    # layer sits on the middle one, so drop the whole block or the file will
+    # not parse
+    lines = text.splitlines()
+    drop = {i + d for i, ln in enumerate(lines) if "F.CrtYd" in ln
+            for d in (-1, 0, 1)}
+    stripped = "\n".join(ln for i, ln in enumerate(lines) if i not in drop)
+    p = tmp_path / "nocrtyd.kicad_mod"
+    p.write_text(stripped, encoding="utf-8")
+    fp = V.load_footprint(p)
+    assert not [it for it in fp.items if "F.CrtYd" in it.layers]
+
+    g = V.check_geometry(fp, cfg())
+    assert g.level == V.PASS, detail_text(g)
+    hit = [d for d in g.details if "closest approach" in d]
+    assert hit, detail_text(g)
+    got = float(hit[0].split("closest approach of any filled area to the cut ")
+                [1].split(" mm")[0])
+    assert math.isclose(got, 0.5062, abs_tol=1e-4), got
+
+
+# --------------------------------------------------------------------------
 # end to end, against the part this was all about
 # --------------------------------------------------------------------------
 
@@ -585,7 +736,7 @@ def test_every_baked_glyph_still_matches_this_kicad():
     """
     import tempfile
     cli = _kicad_cli()
-    chars = [c for c in map(chr, range(0x20, 0x7F))]
+    chars = [c for c in map(chr, range(0x20, 0x7F))] + ["·", "α", "β"]
     with tempfile.TemporaryDirectory() as td:
         tmp = pathlib.Path(td)
         lib = tmp / "in.pretty"
@@ -618,4 +769,5 @@ def test_every_baked_glyph_still_matches_this_kicad():
                            f"GLYPH_PATHS has {want}")
         assert not bad, bad
     total = sum(len(c) - 1 for v in SF.GLYPH_PATHS.values() for c in v)
-    assert total == 788, total      # the table as measured on 2026-08-17
+    assert total == 834, total      # 788 ASCII (2026-08-17) + 46 for
+    #                                 U+00B7/U+03B1/U+03B2 (2026-08-19)
