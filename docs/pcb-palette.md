@@ -435,11 +435,8 @@ mask (`--shape-center-band` relaxes this to the band's centre line). That is the
 conservative reading: a row of letterforms is as tall as its band, so testing
 only the centre would let ascenders and descenders hang past the silhouette.
 
-Three refusals, all of them the same principle as the rest of this document —
-never truncate silently:
+Two refusals about the shape itself:
 
-- text left over when the shape fills up is **refused**, with the count of
-  unplaced words and the cap height at which it did fit;
 - a shape that rasterises to nothing is refused, and names `--shape-element` as
   the fix (`examples/bitcoin_b.svg` stacks a rounded square, a disc and the
   currency mark, so rasterising the file whole gives a filled square);
@@ -448,6 +445,68 @@ never truncate silently:
 
 Spans too narrow for the next word are left **blank** and reported, not filled by
 inventing a hyphen the author did not write. `--shape-hyphenate` opts in.
+
+A hyphen the author *already* wrote is a different thing and is always used: the
+body is split at its existing hyphens into pieces that carry their own hyphen
+(`peer-to-peer` is `peer-` + `to-` + `peer`), so breaking between them inserts
+nothing, removes nothing, and needs no flag and no minimum-letter rule. Measured
+on the Bitcoin mark at the JLCPCB fine floor, that alone is worth +267 characters
+and +13 filled bands on a 2.5 in mark with `--shape-hyphenate` still off; the
+flag itself is then worth a further 0-12%, and it stays off by default because it
+breaks on width rather than on syllables and will set `controlled` as
+`contro-lled`.
+
+#### Does the text fit the shape? Both answers are conclusions, not statistics
+
+The flow reported `M/N mask spans filled` and stopped there, which reads
+identically whether the body fitted the silhouette or ran out with a third of
+the bands still blank. It now ends in a **verdict**, in both directions, each
+with the arithmetic to act on it.
+
+**Underfill — the text ran out before the shape did.** Whole row bands are blank
+for want of words. This **warns**: nothing was lost, every character supplied is
+on the board in order, and the gap is visible to the naked eye — the opposite of
+the sub-floor stroke this tool refuses over, which no reader could ever catch.
+The message names the shortfall in characters and both remedies: *provide more
+text, or lower the microprinting resolution to a **larger** cap height* — fewer,
+wider rows, and so less to fill. `--shape-require-fill` makes it fatal, for an
+unattended build where a warning on stdout is a warning nobody reads.
+
+**Overfill — the shape ran out before the text did.** Text is **truncated**, and
+that is strictly worse than underfill: a reader cannot see a word that is not
+there, so there is no blank to notice. This **refuses**, and the message names
+the characters that did not fit and the **smaller** cap height that would hold
+them — finer, so more and narrower rows. When the floor bounds how fine the
+process can go, it says so outright: *this text cannot be made to fit this shape
+at this process*, and by how many characters it misses at the finest legal cap.
+`--shape-allow-truncation` turns the refusal into a warning and records the
+dropped characters in the report. **Announced truncation is a choice; silent
+truncation is a defect.**
+
+Every cap height either message offers is **measured, not modelled**: the flow
+is re-run at that cap and the number is only quoted if it verified. The flow
+re-breaks at every span, so a capacity formula in cap height would be a guess
+dressed as a number. The character shortfall is measured the same way — the body
+is extended with its own prose and the flow bisected on how much it takes. A
+width-times-density figure was tried first and reads high, because greedy
+wrapping wastes far more of a narrow span than of a wide one: on the shipped ₿
+it says 117 characters short where 89 already clears the last band.
+
+**The threshold is one whole row band, and it is not a percentage.** A
+letterform's extremities are always slivers no word fits, so "fraction of bands
+carrying text" does not separate the cases: measured over 19 runs on 9 shapes in
+this tree it ranges from 0% to 100%, and `reckless_black.svg` carries text in 15
+of 43 bands (35%) while being not underfilled at all — 180 of its 197 spans are
+gaps between strokes. The measure is capacity **abandoned**: span width the flow
+reached, wide enough to hold the narrowest word in the body, that got nothing
+because there were no words left. That is exactly 0 mm for all 15 runs where the
+text did not run out, and 85 / 119 / 127 / 509 mm for the 4 where it did. There
+is no measured case in between.
+
+The report also carries the **row-fill distribution** — min, max, mean and
+stdev/mean of characters per row — whatever the verdict. The shipped ₿ runs 4 to
+67 characters a row with a stdev half the mean; the short rows *are* the
+silhouette, and the spread is how hard the shape pinches.
 
 The mask opening stays **one block**, exactly as for `--region`. An opening cut
 to the silhouette would have to place its edge to a tolerance the process does
@@ -956,25 +1015,35 @@ Three of the exclusions are not generic and are named as such in the source:
   invalidates it. Regenerate; never maintain, and never merge a textured board
   back into a development branch.
 
-## The spectre stops at level 1
+## The spectre stopped at level 1, and the reason was a missing reflection
 
-`SPECTRE_VERIFIED_LEVEL = 1`, and it is not a knob — it is what the audit earned.
-The tile and its 9-tile cluster are exact and hard-audited; a level-2 patch was
-built with the published 71 tiles, zero overlaps, one boundary loop, no holes and
-no reflected tile, and was **rejected on compactness**: 64 % hull fill against
-80.4 % for a true supertile.
+**Superseded.** This section used to read "the spectre stops at level 1" and
+recorded `SPECTRE_VERIFIED_LEVEL = 1` as what the audit had earned. It was an
+honest report of a broken substitution. Kept here because the diagnosis is worth
+the paper: the quad grew by exactly **3.000000** per step where the tile counts
+force `sqrt(4 + sqrt(15)) = 2.805884`, so the eight children were pushed 6.9 %
+too far apart per level; level 2 came out as three disconnected lumps filling
+64 % of their hull, and level 3 self-overlapped in 97 tile pairs. Sweeping all
+32⁴ = 1,048,576 super-quad rules found no eigenvalue of the right modulus, and
+that sweep was correct.
 
-**Do not go hunting for a better anchor quad.** The cause is structural and was
-measured: the quad grows by exactly **3.000000** per substitution step where the
-tile counts force `sqrt(4 + sqrt(15)) = 2.805884`, so the eight children are
-pushed 6.9 % too far apart per level and the patch comes out as a ring of eight
-clusters around a connected void of 21.2 tile areas. The quad is forced (of
-24024 ordered vertex 4-tuples exactly four make a valid cluster, and all four
-give the same one), and no anchor quad fixes it (0 hits across all 32⁴ =
-1,048,576 super-quad rules at tolerance 1e-7). The next thing to try is
-structural and is written up in `tools/tilings.py`: the module collapses the nine
-metatile labels into two, and restoring them — each with its own quad — is the
-candidate fix. Until then, `hex`.
+**What was actually missing** is one line: the published substitution composes a
+**reflection** onto all eight slot transforms at every generation — the paper
+says "the rules of Figure 2.1 reverse all tile orientations" — so the one-step
+quad map is *anti*-linear and its growth is invisible to any linear eigenvalue
+sweep. The searches were sound; the framework they searched was the defect. The
+standing hypothesis at the time, that restoring the nine metatile labels was the
+fix, was **wrong and is now measured to be wrong**: nine labels without the
+reflection give 9 overlapping pairs at level 2 and 1908 at level 3, while the old
+two-cluster collapse *with* the reflection is clean at both.
+
+`SPECTRE_AUDITED_LEVEL = 5` now: 34 649 tiles, audited pair by pair with exact
+integer predicates — zero overlapping pairs, zero proper edge crossings, one
+boundary loop, no holes, no mirrored tile. `spectre_region_fill` covers a
+150 × 100 mm board with 1 564 whole 3 mm tiles at seed 0 — 1 783 offered,
+219 dropped for crossing the perimeter. `spectre_fingerprint` no longer answers
+that frame at all: it refuses rather than clamp to a level that merely spans it. `hex` is no longer the only
+answer. See the ledger in `tools/tilings.py`.
 
 ---
 
