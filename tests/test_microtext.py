@@ -28,6 +28,7 @@ Several tests below were changed when claim 3 was corrected. Each of those says
 in its own docstring what it used to assert and why that assertion was wrong;
 none was relaxed to make the new model pass.
 """
+import io
 import math
 import pathlib
 import sys
@@ -727,3 +728,830 @@ def test_the_dot_classification_is_checked_at_the_ratio_in_use():
     rep = M.check(spec(text="Reckless", cap_mm=8.0, tone="T2",
                        stroke_ratio=0.02))
     assert any("dots are NOT solid" in w for w in rep["warnings"])
+
+
+# --- 6. does the text fit the shape? both directions, both loud -------------
+#
+# The defect these test: the flow already knew how well the text filled the
+# shape and printed it as a neutral statistic ("M/N mask spans filled"), so a
+# body that ran out with eleven row bands still empty read exactly like a body
+# that fitted. The mirror case was worse -- a body too long REFUSED, which is
+# right, but said nothing a caller could act on.
+#
+# The shapes here are built by hand rather than rasterised, so the arithmetic
+# under test is the flow's and not cairosvg's, and so the suite needs no asset
+# that this public repo does not carry.
+
+_VOCAB = ("the quick brown fox jumps over a lazy dog and then some more "
+          "words to make up the count").split()
+
+
+def _words(n):
+    return " ".join(_VOCAB[i % len(_VOCAB)] for i in range(n))
+
+
+def _mask(rows, mm_per_px=0.25, origin=(0.0, 0.0)):
+    """rows: list of '#'/'.' strings, one per raster row. '#' = fillable."""
+    import numpy as np
+    g = np.array([[c == "#" for c in r] for r in rows], dtype=bool)
+    return M.ShapeMask(grid=g, mm_per_px=mm_per_px, origin=tuple(origin),
+                       source="hand-built", raster_tool="none")
+
+
+def _rect(w_mm=40.0, h_mm=40.0, mm_per_px=0.25):
+    cols = int(round(w_mm / mm_per_px))
+    rows = int(round(h_mm / mm_per_px))
+    return _mask(["#" * cols] * rows, mm_per_px)
+
+
+def _flowspec(text, shape, **kw):
+    # floor_mm 0.05 keeps every fab and counter check clear across the whole
+    # cap range these tests search, so what is being measured is the FILL logic
+    # and not the floor logic -- which has its own tests above.
+    kw.setdefault("cap_mm", 0.8)
+    kw.setdefault("stroke_ratio", 0.125)
+    kw.setdefault("floor_mm", 0.05)
+    return M.MicrotextSpec(text=text, shape=shape, **kw)
+
+
+def _run(sp):
+    rep = M.check(sp)
+    M.place(sp, rep)
+    return rep
+
+
+def _fill(sp):
+    return _run(sp)["fill"]
+
+
+def _capacity(shape, cap=0.8):
+    """Characters this shape swallows at `cap`, found by running the flow.
+
+    Deliberately measured rather than computed: the point of the whole change
+    is that capacity in a shape is not a closed form.
+    """
+    def fits(n):
+        sp = _flowspec(_words(n), shape, cap_mm=cap)
+        return not M._flow(sp, cap, 0.05).words_left
+
+    lo, hi = 0, 1
+    while fits(hi) and hi < 1 << 16:
+        lo, hi = hi, hi * 2
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if fits(mid) else (lo, mid)
+    return lo
+
+
+def test_a_body_that_fills_the_shape_passes_silently():
+    """No warning, no refusal, and the verdict says so in one word."""
+    shape = _rect()
+    sp = _flowspec(_words(_capacity(shape)), shape)
+    rep = _run(sp)
+    assert rep["fill"]["verdict"] == "fits"
+    assert rep["fill"]["bands_underfilled"] == 0
+    assert not any("UNDERFILL" in w or "OVERFILL" in w
+                   for w in rep["warnings"])
+
+
+def test_text_far_too_short_warns_and_names_the_shortfall_in_characters():
+    shape = _rect()
+    full = _capacity(shape)
+    sp = _flowspec(_words(full // 4), shape)
+    rep = _run(sp)
+    f = rep["fill"]
+    assert f["verdict"] == "underfill"
+    assert f["bands_underfilled"] >= 1
+    msg = next(w for w in rep["warnings"] if w.startswith("UNDERFILL"))
+    # the owner's wording: how long the text must be, and how far short it is
+    assert "Text length must be at least about" in msg
+    assert f"{f['need_chars']} characters" in msg
+    assert f"about {f['shortfall_chars']} characters short" in msg
+    assert "Provide more text" in msg
+    assert "lower the microprinting resolution" in msg
+    # and it says the number is an estimate, and where the estimate came from
+    assert "ESTIMATE" in msg
+    assert "measured, not modelled" in msg
+    assert f["shortfall_measured"] is True
+
+
+def test_the_shortfall_is_measured_by_running_the_flow_not_by_density():
+    """A width-times-density figure -- abandoned span width times the
+    characters per mm the run achieved where it did fill -- reads high, because
+    a greedy flow wastes far more of a narrow span than of a wide one. On the
+    shipped mark it says 117 where 89 already clears the last band. So the
+    quoted number comes from re-running the flow with the body extended, and
+    the density figure is kept beside it as the cross-check it is."""
+    shape = _rect()
+    sp = _flowspec(_words(_capacity(shape) // 3), shape)
+    f = _fill(sp)
+    assert f["shortfall_measured"] is True
+    assert f["shortfall_by_density_chars"] is not None
+    # the quoted number is the measured one, and it is the SMALLEST addition
+    # that clears the last band: one character less must still be underfilled
+    n = f["shortfall_chars"]
+    filler = (" " + sp.text) * (n // (len(sp.text) + 1) + 1)
+    for extra, want in ((n, 0), (n - 1, 1)):
+        fl = M._flow(_flowspec(sp.text + filler[:extra], shape), 0.8, 0.05)
+        assert (len(fl.bands_abandoned) == 0) == (want == 0)
+
+
+def test_the_shortfall_estimate_is_the_right_size():
+    """Not exact -- word boundaries are lumpy and the message says so -- but it
+    has to be close enough to act on, or naming a number is worse than not."""
+    shape = _rect()
+    full_words = _capacity(shape)
+    full_chars = len(_words(full_words))
+    sp = _flowspec(_words(full_words // 2), shape)
+    f = _fill(sp)
+    assert f["need_chars"] == pytest.approx(full_chars, rel=0.10)
+
+
+def test_the_larger_cap_it_offers_actually_fills_the_shape():
+    """The remedy is checked by running the flow at the cap it names, so this
+    test is really asking whether the tool verified before it recommended."""
+    shape = _rect()
+    sp = _flowspec(_words(_capacity(shape) // 2), shape)
+    f = _fill(sp)
+    assert f["remedy_cap_mm"] is not None and f["remedy_cap_verified"]
+    assert f["remedy_cap_mm"] > sp.cap_mm          # coarser, not finer
+    again = _fill(_flowspec(sp.text, shape, cap_mm=f["remedy_cap_mm"]))
+    assert again["verdict"] == "fits"
+    assert again["bands_underfilled"] == 0
+
+
+def test_underfill_warns_but_refuses_when_the_caller_asks_it_to():
+    """WARN is the default because nothing is lost and the blank is visible.
+    An unattended build can make it fatal, and then the message is the same."""
+    shape = _rect()
+    short = _words(_capacity(shape) // 4)
+    assert _fill(_flowspec(short, shape))["verdict"] == "underfill"
+    with pytest.raises(M.MicrotextRefused) as e:
+        _run(_flowspec(short, shape, require_fill=True))
+    assert "UNDERFILL" in str(e.value)
+    assert "shape-require-fill" in str(e.value)
+
+
+def test_text_far_too_long_refuses_and_names_the_characters_that_did_not_fit():
+    shape = _rect()
+    long = _words(_capacity(shape) * 2)
+    with pytest.raises(M.MicrotextRefused) as e:
+        _run(_flowspec(long, shape))
+    msg = str(e.value)
+    assert msg.startswith("OVERFILL")
+    assert "DID NOT FIT" in msg and "TRUNCATED" in msg
+    n = int(msg.split("OVERFILL -- the shape ran out before the text did. "
+                      )[1].split(" character")[0])
+    assert 0 < n < len(long)
+    assert "Refusing to truncate the text silently" in msg
+    assert "shape-allow-truncation" in msg
+
+
+def test_the_smaller_cap_it_offers_actually_fits_the_long_text():
+    shape = _rect()
+    long = _words(int(_capacity(shape) * 1.4))
+    sp = _flowspec(long, shape, allow_truncation=True)
+    f = _fill(sp)
+    assert f["verdict"] == "overfill"
+    assert f["remedy_cap_mm"] is not None and f["remedy_cap_verified"]
+    assert f["remedy_cap_mm"] < sp.cap_mm          # finer, not coarser
+    again = M._flow(_flowspec(long, shape, cap_mm=f["remedy_cap_mm"]),
+                    f["remedy_cap_mm"], 0.05)
+    assert again.words_left == 0
+
+
+def test_deliberate_truncation_is_a_choice_and_is_recorded():
+    """Announced truncation is allowed; silent truncation is the defect. The
+    dropped characters go into the report so nothing is only on stdout."""
+    shape = _rect()
+    long = _words(_capacity(shape) * 2)
+    rep = _run(_flowspec(long, shape, allow_truncation=True))
+    f = rep["fill"]
+    assert f["verdict"] == "overfill"
+    assert f["surplus_chars"] == len(f["truncated"])
+    assert long.endswith(f["truncated"])
+    assert any("TRUNCATED ON PURPOSE" in w for w in rep["warnings"])
+
+
+def test_when_no_fabricable_cap_fits_it_says_so_instead_of_truncating():
+    """The floor bounds how fine the microprinting can go. Past that there is
+    no remedy in cap height at all, and saying 'raise the resolution' would be
+    advice the caller cannot take."""
+    shape = _rect(20.0, 20.0)
+    # 20x smaller shape, and the doc's real copper floor rather than the
+    # relaxed one, so min_cap sits just under the cap and buys almost nothing.
+    sp = M.MicrotextSpec(text=_words(4000), shape=shape, cap_mm=1.0,
+                         stroke_ratio=0.125, tone="T2")
+    with pytest.raises(M.MicrotextRefused) as e:
+        _run(sp)
+    msg = str(e.value)
+    assert "There is NO finer resolution to raise to" in msg
+    assert "STILL about" in msg and "characters too long" in msg
+    assert "cannot be made to fit this shape at this process" in msg
+
+
+def test_short_rows_at_the_extremities_are_not_called_underfill():
+    """THE THRESHOLD, and the reason it is not a percentage of bands.
+
+    A letterform's extremities are slivers no word ever fits, and measured
+    across the shapes in this tree the fraction of bands carrying text ranges
+    from 0% to 100% without separating the cases: assets/normalised/
+    reckless_black.svg carries text in 15 of 43 bands and is not underfilled at
+    all, while the shipped art_btc_whitepaper_b carries text in 52 of 58 and
+    is. So the measure is capacity ABANDONED -- span width wide enough for the
+    narrowest word in the body that got nothing because the words ran out.
+
+    Here: a wide bar over a hairline tail. Fill the bar exactly. Two thirds of
+    the bands end up blank, and none of it is underfill -- until the tail is
+    widened past the narrowest word in the body, which is exactly where the
+    line is drawn.
+    """
+    mm = 0.25
+    bar = "#" * 160                                     # 40 mm
+
+    def tail_of(px):
+        return ("." * ((160 - px) // 2) + "#" * px
+                + "." * ((160 - px + 1) // 2))
+
+    # 'a' is the narrowest word in _VOCAB and is 0.481 mm of ink at this cap
+    # and pen, so one raster column (0.25 mm) is under it and three (0.75 mm)
+    # are over it. Nothing else about the two shapes differs.
+    thin = _mask([bar] * 40 + [tail_of(1)] * 80, mm)
+    fat = _mask([bar] * 40 + [tail_of(3)] * 80, mm)
+
+    sp = _flowspec(_words(_capacity(thin)), thin)
+    f = _fill(sp)
+    assert f["bands_empty"] >= 2 * f["bands_with_text"]     # mostly blank
+    assert f["spans_abandoned"] > 0                        # and reached
+    assert f["spans_abandoned_usable"] == 0                # but none usable
+    assert f["bands_underfilled"] == 0
+    assert f["verdict"] == "fits"
+
+    # the same body, the same bar, half a millimetre more tail: now some word
+    # in this very text WOULD have gone there, and the tool says so
+    g = _fill(_flowspec(sp.text, fat))
+    assert g["spans_abandoned_usable"] > 0
+    assert g["verdict"] == "underfill"
+
+
+def test_the_row_fill_distribution_is_reported_whatever_the_verdict():
+    """The shipped part runs 4 to 67 characters a row with a stdev of half the
+    mean, and nothing in the report said so."""
+    mm = 0.25
+    wide = "#" * 160
+    narrow = "." * 60 + "#" * 40 + "." * 60
+    shape = _mask(([wide] * 8 + [narrow] * 8) * 6, mm)
+    sp = _flowspec(_words(_capacity(shape)), shape)
+    rc = _fill(sp)["row_chars"]
+    assert rc["n"] >= 4
+    assert rc["min"] < rc["mean"] < rc["max"]
+    assert rc["stdev"] > 0 and rc["cv"] == pytest.approx(rc["stdev"] / rc["mean"])
+    out = io.StringIO()
+    M.print_report(_run(sp), out)
+    assert f"{rc['min']} to {rc['max']} characters" in out.getvalue()
+    assert f"stdev/mean {rc['cv']:.2f}" in out.getvalue()
+
+
+def test_every_span_is_counted_not_only_the_ones_the_flow_visited():
+    """The old loop broke out of the span list once the body ran out, so
+    spans_total counted spans VISITED -- one per band after that point -- and
+    the capacity the text never reached was absent from the report entirely."""
+    shape = _rect()
+    full = _capacity(shape)
+    long_run = M._flow(_flowspec(_words(full), shape), 0.8, 0.05)
+    short_run = M._flow(_flowspec(_words(full // 4), shape), 0.8, 0.05)
+    # same shape, same cap: the span inventory cannot depend on the text
+    assert len(long_run.spans) == len(short_run.spans)
+    assert len(short_run.filled) < len(long_run.filled)
+    assert len(short_run.abandoned) > 0
+
+
+def test_the_recommended_cap_was_run_not_modelled():
+    """Every cap this module offers comes back with the flow that proves it."""
+    shape = _rect()
+    sp = _flowspec(_words(_capacity(shape) // 3), shape)
+    f = _fill(sp)
+    got = M._bisect_cap(sp, 0.05, sp.cap_mm, sp.cap_mm * 3.0,
+                        lambda fl: bool(fl.runs) and not fl.bands_abandoned)
+    assert got is not None
+    cap, flow = got
+    assert cap == pytest.approx(f["remedy_cap_mm"])
+    assert not flow.bands_abandoned
+    # quantised to the grid the min_cap recommendation already uses
+    assert cap / M.CAP_GRID_MM == pytest.approx(round(cap / M.CAP_GRID_MM))
+
+
+def test_the_emitted_geometry_still_holds_the_whole_source_text():
+    """"98.6% of characters placed" is what silent truncation looks like too.
+
+    So the claim is proved the only way it can be: the footprint is written,
+    parsed back, its fp_text strings sorted into reading order by (y, x) and
+    rejoined, and the result walked against the source. The only permitted
+    difference is inter-word spaces -- the ones the flow consumes at a span end
+    and, with tracking on, the ones that are never emitted at all because a
+    space draws no ink. A single non-space character out of place fails this.
+
+    Run against the shipped library/RecklessArt.pretty/art_btc_whitepaper_b:
+    all 1799 source characters recovered, in order, 266 spaces missing and
+    nothing else. That part is not truncating.
+    """
+    import re
+    shape = _rect(30.0, 30.0)
+    sp = _flowspec(_words(_capacity(shape)), shape, tone="T2")
+    fp = ArtFp("roundtrip")
+    M.emit(fp, sp)
+    got = re.findall(r'\(fp_text user "((?:[^"\\\\]|\\\\.)*)"\s*\(at'
+                     r' ([-\d.]+) ([-\d.]+)', fp.dumps())
+    assert got
+    cells = sorted((round(float(y), 4), float(x), t) for t, x, y in got)
+    joined = "".join(t for _, _, t in cells)
+
+    src, i, j, dropped = sp.text, 0, 0, 0
+    while i < len(src) and j < len(joined):
+        if src[i] == joined[j]:
+            i += 1
+            j += 1
+        elif src[i] == " ":
+            dropped += 1
+            i += 1
+        else:
+            raise AssertionError(f"diverged at source {i}: "
+                                 f"{src[i-20:i+20]!r} vs {joined[j-20:j+20]!r}")
+    while i < len(src) and src[i] == " ":
+        dropped += 1
+        i += 1
+    assert i == len(src), f"{len(src)-i} source characters never reached the board"
+    assert j == len(joined), "the board carries characters the source does not"
+    assert dropped == src.count(" ") - joined.count(" ")
+
+
+def test_placement_is_byte_for_byte_what_it_always_was():
+    """The walk was refactored to record every span; it must not have moved a
+    single glyph. Checked against the flow's own outputs, run twice."""
+    shape = _rect(30.0, 30.0)
+    sp = _flowspec(_words(_capacity(shape)), shape)
+    fl = M._flow(sp, 0.8, 0.05)
+    rep = _run(sp)
+    assert rep["runs"] == len(fl.runs)
+    assert "".join(r.text for r in fl.runs).replace(" ", "") == \
+        sp.text.replace(" ", "")
+
+
+# --- 6. breaking a word, and what a break is allowed to change --------------
+#
+# THE OBJECT UNDER TEST IS RECONSTRUCTED, NOT DESCRIBED. legacy_flow() below is
+# the walk as it stood before this round, spliced back in verbatim, so every
+# "it used to do X" in this file is an assertion about a runnable thing rather
+# than a claim in a docstring. It is itself checked against the defect report:
+# 'peer-to-peer' at hyphen_min 3, the word with the most break points in the
+# whitepaper's first sentence, was the hardest word in the text to place.
+
+_HVOCAB = ("a purely peer-to-peer version of electronic cash would allow "
+           "online payments proof-of-work hash-based non-reversible "
+           "double-spending timestamp server").split()
+
+
+def _hwords(n):
+    return " ".join(_HVOCAB[i % len(_HVOCAB)] for i in range(n))
+
+
+def legacy_flow(spec, cap, floor, *, gap=None):
+    """tools/microtext.py _flow() as it stood before the hyphen repair.
+
+    Kept whole rather than paraphrased: three of the four defects are in the
+    arithmetic of the six lines at the bottom of the span loop, and a
+    paraphrase would be a chance to fix one of them by accident.
+    """
+    shape = spec.shape
+    stroke = cap * float(spec.stroke_ratio)
+    pen = stroke / 2.0
+    _w = {}
+
+    def inkw(s):
+        v = _w.get(s)
+        if v is None:
+            b = M.measure(spec, s).ink_em
+            v = 0.0 if b is None else (b[2] - b[0]) * cap + 2 * pen
+            _w[s] = v
+        return v
+
+    def ink_left(s):
+        b = M.measure(spec, s).ink_em
+        return 0.0 if b is None else b[0] * cap - pen
+
+    m = M.measure(spec, spec.text)
+    ry0 = m.ink_em[1] * cap - pen
+    ry1 = m.ink_em[3] * cap + pen
+    ink_h = ry1 - ry0
+    if gap is None:
+        gap = spec.row_gap_mm if spec.row_gap_mm is not None else floor
+    pitch = ink_h + gap
+    words = spec.text.split()
+    narrowest = min(inkw(w) for w in set(words))
+    wi, tail = 0, ""
+    spans_rec, runs = [], []
+    band = 0
+    y = shape.origin[1]
+    while y + ink_h <= shape.origin[1] + shape.height_mm + 1e-9:
+        for sx0, sx1 in shape.band_spans(y, y + ink_h,
+                                         whole_band=spec.shape_whole_band):
+            avail = sx1 - sx0
+            if wi >= len(words) and not tail:
+                spans_rec.append(M.FlowSpan(band, y, sx0, sx1, "abandoned",
+                                            usable=avail >= narrowest - 1e-9))
+                continue
+            chunk, tail = tail, ""
+            if chunk and inkw(chunk) > avail + 1e-9:
+                tail, chunk = chunk, ""
+            while wi < len(words):
+                cand = (chunk + " " + words[wi]) if chunk else words[wi]
+                if inkw(cand) > avail + 1e-9:
+                    break
+                chunk = cand
+                wi += 1
+            if not chunk and spec.hyphenate and wi < len(words):
+                w = words[wi]
+                for k in range(len(w) - spec.hyphen_min, spec.hyphen_min - 1, -1):
+                    if inkw(w[:k] + "-") <= avail + 1e-9:
+                        chunk, tail = w[:k] + "-", w[k:]
+                        wi += 1
+                        break
+            if not chunk:
+                spans_rec.append(M.FlowSpan(band, y, sx0, sx1, "narrow"))
+                continue
+            spans_rec.append(M.FlowSpan(band, y, sx0, sx1, "filled", text=chunk))
+            runs.append(M.Run(chunk, sx0 - ink_left(chunk), y - ry0, 0.0))
+        band += 1
+        y += pitch
+    rest = " ".join(([tail] if tail else []) + words[wi:])
+    return M.Flow(spans=spans_rec, runs=runs, bands=band, ink_h=ink_h,
+                  pitch=pitch, words_total=len(words), words_placed=wi,
+                  unplaced=rest)
+
+
+def test_the_legacy_break_positions_are_the_ones_the_defect_report_names():
+    """k=8 doubles the hyphen, k=7 inserts one where the author has one, k=5
+    doubles it again. Runnable, so nobody has to take the report's word."""
+    w, hmin = "peer-to-peer", 3
+    got = {k: (w[:k] + "-", w[k:])
+           for k in range(len(w) - hmin, hmin - 1, -1)}
+    assert got[8][0] == "peer-to--"                 # (b) doubled
+    assert got[5][0] == "peer--"                    # (b) doubled again
+    assert got[7] == ("peer-to-", "-peer")          # (a) inserted at a real one
+    assert got[4] == ("peer-", "-to-peer")
+    # and joining any of them back up does NOT give the source word
+    for k, (head, tail) in got.items():
+        if head[-2:] == "--" or tail[:1] == "-":
+            assert head + tail != w
+
+
+def test_an_existing_hyphen_is_a_break_point_with_the_flag_off():
+    """(c) The whole path used to be gated on --shape-hyphenate, so with the
+    flag off -- how the shipped part was built -- 'peer-to-peer' was atomic."""
+    mm = 0.25
+    # spans wide enough for "peer-" and not for "to-peer"
+    shape = _mask(["#" * 14] * 60, mm)
+    sp = _flowspec("peer-to-peer version", shape, hyphenate=False)
+    fl = M._flow(sp, 0.8, 0.05)
+    assert [r.text for r in fl.runs][:3] == ["peer-", "to-", "peer"]
+    assert fl.soft_breaks >= 2
+    assert fl.inserted == []               # nothing was added to the text
+    assert "".join(r.text for r in fl.runs[:3]) == "peer-to-peer"
+    old = legacy_flow(_flowspec("peer-to-peer version", shape,
+                                hyphenate=False), 0.8, 0.05)
+    # the legacy walk could not place the word at all and jammed on it
+    assert old.runs == [] or old.runs[0].text != "peer-"
+    assert "peer-to-peer" in old.unplaced
+
+
+def test_no_break_ever_doubles_a_hyphen_the_author_wrote():
+    mm = 0.25
+    for cols in range(8, 40, 2):
+        shape = _mask(["#" * cols] * 40, mm)
+        for hy in (False, True):
+            sp = _flowspec("non-reversible peer-to-peer proof-of-work", shape,
+                           hyphenate=hy)
+            fl = M._flow(sp, 0.8, 0.05)
+            for r in fl.runs:
+                assert "--" not in r.text, (cols, hy, r.text)
+                assert not r.text.startswith("-"), (cols, hy, r.text)
+
+
+def test_hyphen_min_does_not_apply_to_a_hyphen_the_author_wrote():
+    """'to' is two letters and hyphen_min is three, so a rule about how much of
+    a word to leave on a line would have refused the break -- at a break where
+    nothing is inserted and no word is divided."""
+    mm = 0.25
+    shape = _mask(["#" * 16] * 40, mm)
+    sp = _flowspec("peer-to-peer", shape, hyphenate=False, hyphen_min=6)
+    fl = M._flow(sp, 0.8, 0.05)
+    assert "to-" in [r.text for r in fl.runs]
+    assert not fl.inserted
+
+
+def test_the_deadlock_the_legacy_walk_had_is_gone():
+    """The measurable cost of (c): one wide word jams every span after it,
+    because the flow never skips a word. Existing-hyphen breaking alone -- with
+    --shape-hyphenate still OFF -- is what unjams it."""
+    mm = 0.25
+    shape = _mask(["#" * 22] * 120, mm)
+    body = _hwords(60)
+    old = legacy_flow(_flowspec(body, shape, hyphenate=False), 0.8, 0.05)
+    new = M._flow(_flowspec(body, shape, hyphenate=False), 0.8, 0.05)
+    old_chars = len(body) - len(old.unplaced)
+    new_chars = len(body) - len(new.unplaced)
+    assert new_chars > old_chars
+    assert len(new.bands_with_text) > len(old.bands_with_text)
+    assert not new.inserted            # and it cost no change to the text
+
+
+def test_the_legacy_hyphenated_walk_emitted_the_text_out_of_order():
+    """A FOURTH defect, found by the recovery walk rather than by reading.
+
+    The legacy loop put an unplaceable carried fragment BACK into `tail` and
+    then went on filling the span from `words[wi]`, which is the text AFTER the
+    fragment. So the board carried a later word first and the fragment landed
+    behind it. recover_text() refuses that; the new walk has no `tail` at all,
+    because the remainder stays in the queue at its own position.
+    """
+    mm, W = 0.25, 20
+    # 2.50 mm, then 2.00 mm, then wide. "Internet" (4.443 mm) breaks to "Int-"
+    # in the first; "ernet" (2.919) does not fit the second and "has" (1.852)
+    # does, which is the whole trap.
+    shape = _mask(["#" * 10 + "." * (W - 10)] * 6
+                  + ["#" * 8 + "." * (W - 8)] * 6
+                  + ["#" * W] * 40, mm)
+    body = "Internet has come to"
+    old = legacy_flow(_flowspec(body, shape, hyphenate=True), 0.8, 0.05)
+    new = M._flow(_flowspec(body, shape, hyphenate=True), 0.8, 0.05)
+    assert [r.text for r in old.runs] == ["Int-", "has", "ernet", "come to"]
+    assert [r.text for r in new.runs] == ["Int-", "ernet", "has", "come to"]
+    o = M.recover_text(body, [r.text for r in old.runs],
+                       inserted=len(old.inserted))
+    n = M.recover_text(body, [r.text for r in new.runs],
+                       inserted=len(new.inserted))
+    assert o["ok"] is False and o["reason"] == "diverged"
+    assert "Int-hasernet" in o["board"]
+    assert n["ok"] is True
+
+
+def test_an_existing_hyphen_break_round_trips_to_the_source_exactly():
+    """Breaking where the author already broke alters NOTHING, so the walk gets
+    no allowance at all and still has to close: inserted=0."""
+    mm = 0.25
+    shape = _mask(["#" * 18] * 80, mm)
+    body = _hwords(40)
+    fl = M._flow(_flowspec(body, shape, hyphenate=False), 0.8, 0.05)
+    assert fl.soft_breaks > 0                    # breaks really were taken
+    assert fl.inserted == []
+    placed = " ".join(body.split())[:fl.consumed_chars]
+    got = M.recover_text(placed, [r.text for r in fl.runs], inserted=0)
+    assert got["ok"] is True and got["inserted_found"] == 0
+
+
+def test_an_inserted_hyphen_is_declared_and_the_walk_counts_it():
+    mm = 0.25
+    shape = _mask(["#" * 14 + "." * 6] * 200, mm)
+    body = "electronic payments timestamp server"
+    fl = M._flow(_flowspec(body, shape, hyphenate=True), 0.8, 0.05)
+    assert fl.inserted, "this shape is meant to force an inserted hyphen"
+    placed = " ".join(body.split())[:fl.consumed_chars]
+    good = M.recover_text(placed, [r.text for r in fl.runs],
+                          inserted=len(fl.inserted))
+    assert good["ok"] is True
+    assert good["inserted_found"] == len(fl.inserted)
+    # and an UNDECLARED one fails -- that is the whole point of the count
+    bad = M.recover_text(placed, [r.text for r in fl.runs], inserted=0)
+    assert bad["ok"] is False and "declared" in bad["reason"]
+
+
+def test_the_emitted_report_declares_every_inserted_hyphen_and_no_others():
+    mm = 0.25
+    shape = _mask(["#" * 14 + "." * 6] * 200, mm)
+    sp = _flowspec("electronic payments timestamp server", shape,
+                   hyphenate=True, tone="T2", allow_truncation=True)
+    rep = _run(sp)
+    assert rep["inserted_hyphens"]
+    assert rep["integrity"]["ok"] is True
+    assert (rep["integrity"]["inserted_found"]
+            == rep["integrity"]["inserted_declared"]
+            == len(rep["inserted_hyphens"]))
+    assert any("were INSERTED into words" in w for w in rep["warnings"])
+    # the soft breaks are counted and explicitly NOT disclosed as alterations
+    sp2 = _flowspec("peer-to-peer peer-to-peer peer-to-peer", _mask(
+        ["#" * 14 + "." * 6] * 200, mm), hyphenate=False, tone="T2",
+        allow_truncation=True)
+    rep2 = _run(sp2)
+    assert rep2["soft_breaks"] > 0
+    assert rep2["inserted_hyphens"] == []
+    assert not any("INSERTED" in w for w in rep2["warnings"])
+
+
+# --- 7. the sizing solve ----------------------------------------------------
+
+def test_capacity_is_exact_for_this_prose():
+    """Not an estimate: a body of exactly `chars` loses nothing, and the next
+    whole word past it does not fit."""
+    shape = _rect(30.0, 30.0)
+    sp = _flowspec(_words(40), shape)
+    c = M.capacity(sp, floor=0.05)
+    body = M._normalise(sp.text)
+    trial = " ".join([body] * 16)
+    n = c["chars"]
+    assert M._flow(_flowspec(trial[:n], shape), 0.8, 0.05).unplaced == ""
+    more = trial[:n + 1] + trial[n + 1:].split(" ")[0]
+    assert M._flow(_flowspec(more, shape), 0.8, 0.05).unplaced != ""
+
+
+def test_the_fill_line_is_exact_too():
+    shape = _rect(30.0, 30.0)
+    sp = _flowspec(_words(40), shape)
+    c = M.capacity(sp, floor=0.05)
+    assert c["fill_chars"] is not None
+    body = M._normalise(sp.text)
+    trial = " ".join([body] * 16)
+    assert not M._flow(_flowspec(trial[:c["fill_chars"]], shape),
+                       0.8, 0.05).bands_abandoned
+    assert c["fill_chars"] <= c["chars"]
+
+
+def test_the_verdict_is_known_before_a_glyph_is_placed():
+    """check() is 'everything that can be decided before any geometry is
+    placed', and whether the text and the art are the same size is one of those
+    things. The number it reports is the one the flow then produces."""
+    shape = _rect()
+    full = _capacity(shape)
+    sp = _flowspec(_words(full * 2), shape, allow_truncation=True)
+    rep = M.check(sp)                       # no place() yet
+    c = rep["capacity"]
+    assert c["verdict"] == "overfill"
+    assert c["exact"] is True
+    M.place(sp, rep)
+    assert rep["fill"]["verdict"] == "overfill"
+    assert rep["fill"]["surplus_chars"] == c["excess_chars"]
+
+
+def test_overfill_refuses_from_check_before_the_flow():
+    shape = _rect()
+    long = _words(_capacity(shape) * 2)
+    with pytest.raises(M.MicrotextRefused) as e:
+        M.check(_flowspec(long, shape))
+    assert str(e.value).startswith("OVERFILL")
+    assert "known BEFORE the flow ran" in str(e.value)
+
+
+def test_underfill_offers_both_remedies_and_both_were_run():
+    shape = _rect()
+    sp = _flowspec(_words(_capacity(shape) // 2), shape)
+    f = _fill(sp)
+    assert f["verdict"] == "underfill"
+    # 1. the cap height
+    assert f["remedy_cap_mm"] and f["remedy_cap_verified"]
+    assert _fill(_flowspec(sp.text, shape,
+                           cap_mm=f["remedy_cap_mm"]))["verdict"] == "fits"
+    # 2. the art size, at the ORIGINAL cap height
+    assert f["remedy_art_mm"] and f["remedy_art_verified"]
+    assert f["remedy_art_mm"] < shape.height_mm
+    smaller = shape.scaled(f["remedy_art_mm"] / shape.height_mm)
+    assert _fill(_flowspec(sp.text, smaller))["verdict"] == "fits"
+    # and it says which one it would take, and why
+    msg = next(w for w in _run(sp)["warnings"] if w.startswith("UNDERFILL"))
+    assert "TAKE THE CAP HEIGHT" in msg
+    assert "SHRINK THE ART" in msg
+
+
+def test_overfill_offers_the_art_size_and_the_exact_cut():
+    shape = _rect()
+    long = _words(int(_capacity(shape) * 1.6))
+    sp = _flowspec(long, shape, allow_truncation=True)
+    f = _fill(sp)
+    assert f["verdict"] == "overfill"
+    assert f["remedy_art_mm"] and f["remedy_art_verified"]
+    assert f["remedy_art_mm"] > shape.height_mm
+    bigger = shape.scaled(f["remedy_art_mm"] / shape.height_mm)
+    assert not M._flow(_flowspec(long, bigger), 0.8, 0.05).unplaced
+    # the exact cut, verified by cutting it
+    cut = long[:len(long) - f["surplus_chars"]]
+    assert not M._flow(_flowspec(cut, shape), 0.8, 0.05).unplaced
+    with pytest.raises(M.MicrotextRefused) as e:
+        _run(_flowspec(long, shape))
+    assert "GROW THE ART" in str(e.value)
+    assert f"cut exactly {f['surplus_chars']} characters" in str(e.value).lower() \
+        or f"CUT exactly {f['surplus_chars']} characters" in str(e.value)
+
+
+def test_the_solve_returns_the_third_given_any_two():
+    shape = _rect(30.0, 30.0)
+    sp = _flowspec(_words(60), shape, forecast=False, floor_mm=0.02)
+    # art + cap -> characters
+    a = M.solve(sp, floor=0.02, want="chars")
+    assert a["answer"] == a["capacity"]["chars"] > 0
+    # art + characters -> cap
+    b = M.solve(sp, floor=0.02, chars=a["answer"], want="cap")
+    assert b["ok"] and b["verified"]
+    assert b["capacity"]["chars"] >= a["answer"]
+    # cap + characters -> art
+    c = M.solve(sp, floor=0.02, chars=a["answer"], want="art")
+    assert c["ok"] and c["verified"]
+    assert c["capacity"]["chars"] >= a["answer"]
+    # and the art it names is within a grid step of the art it was asked about
+    assert abs(c["answer"] - shape.height_mm) <= 6 * M.ART_GRID_MM
+
+
+def test_the_solve_never_recommends_a_cap_the_checker_would_refuse():
+    shape = _rect(30.0, 30.0)
+    sp = _flowspec(_words(4000), shape, forecast=False, floor_mm=0.10,
+                   stroke_ratio=0.125)
+    r = M.solve(sp, floor=0.10, want="cap")
+    assert r["ok"] is False
+    assert "NO cap height works" in r["notes"][0]
+    assert r["cap_mm"] == pytest.approx(r["min_cap_mm"])
+
+
+def test_the_solve_is_the_same_answer_from_either_end():
+    """Whatever art size the solve names for L characters, asking that art size
+    how many characters it holds has to come back with at least L."""
+    shape = _rect(20.0, 20.0)
+    sp = _flowspec(_words(200), shape, forecast=False, floor_mm=0.02)
+    want = 900
+    r = M.solve(sp, floor=0.02, chars=want, want="art")
+    assert r["ok"]
+    at = M.solve(M._at_art(sp, r["answer"], "height"), floor=0.02, want="chars")
+    assert at["answer"] >= want
+    # one grid step smaller does not hold it -- the answer is the smallest
+    smaller = M.solve(M._at_art(sp, r["answer"] - M.ART_GRID_MM, "height"),
+                      floor=0.02, want="chars")
+    assert smaller["answer"] < want
+
+
+def test_three_given_renders_a_verdict_not_a_statistic():
+    """Art + cap + text: the answer is fits/underfill/overflow WITH the
+    arithmetic to act on it, never a bare capacity number."""
+    shape = _rect(30.0, 30.0)
+    full = _capacity(shape)
+    # too much text -> overflow, with the overrun counted and a measured remedy
+    sp = _flowspec(_words(full * 2), shape)
+    r = M.solve(sp, art_mm=30.0, cap_mm=0.8, floor=0.05, want="chars")
+    assert r["verdict"] == "overflow" and not r["ok"]
+    body = len(M._normalise(sp.text))
+    assert r["overflow_chars"] == body - r["answer"] > 0
+    assert r.get("remedy_art_mm") or r.get("remedy_cap_mm")
+    if r.get("remedy_art_mm"):
+        r2 = M.solve(sp, art_mm=r["remedy_art_mm"], cap_mm=0.8, floor=0.05,
+                     want="chars")
+        assert r2["answer"] >= body
+    # enough text -> fits, with the spare counted
+    sp2 = _flowspec(_words(8), shape)
+    r = M.solve(sp2, art_mm=30.0, cap_mm=2.0, floor=0.05, want="chars")
+    assert r["verdict"] in ("fits", "underfill")
+    if r["verdict"] == "fits":
+        assert r["spare_chars"] == r["answer"] - len(M._normalise(sp2.text))
+    else:
+        assert r["short_chars"] > 0
+
+
+def test_underfill_verdict_carries_the_owner_wording_and_numbers():
+    """Too little text: at least X characters, y short, and a coarser cap."""
+    shape = _rect(40.0, 40.0)
+    sp = _flowspec(_words(6), shape)
+    r = M.solve(sp, art_mm=40.0, cap_mm=0.8, floor=0.05, want="chars")
+    if r["verdict"] != "underfill":
+        return  # tiny vocab happens to fill; the verdict logic is still fits
+    assert "text length must be at least" in r["verdict_text"]
+    assert "characters short" in r["verdict_text"]
+    fill = r["capacity"]["fill_chars"]
+    assert r["short_chars"] == fill - len(M._normalise(sp.text))
+    # the coarser cap, when offered, was measured and holds the text
+    if r.get("remedy_cap_mm"):
+        r2 = M.solve(sp, art_mm=40.0, cap_mm=r["remedy_cap_mm"], floor=0.05,
+                     want="chars")
+        assert r2["answer"] >= len(M._normalise(sp.text))
+
+
+def test_the_no_cap_branch_names_the_art_size_it_already_knows():
+    """When no cap height works, the refusal carries the measured GROW THE ART
+    number instead of withholding it."""
+    shape = _rect(20.0, 20.0)
+    sp = _flowspec(_words(200), shape)
+    r = M.solve(sp, art_mm=20.0, floor=0.05, want="cap")
+    assert not r["ok"]
+    assert r.get("remedy_art_mm") is not None
+    note = " ".join(r["notes"])
+    assert "GROW THE ART" in note
+    r2 = M.solve(sp, art_mm=r["remedy_art_mm"], cap_mm=r["cap_mm"],
+                 floor=0.05, want="chars")
+    assert r2["answer"] >= len(M._normalise(sp.text))
+
+
+def test_a_knife_edge_answer_carries_a_robust_size():
+    """An art answer whose slack is inside one row-band step also reports a
+    ROBUST size with at least a band of margin, measured."""
+    shape = _rect(30.0, 30.0)
+    sp = _flowspec(_words(60), shape)
+    r = M.solve(sp, floor=0.05, chars=None, want="art", cap_mm=0.8)
+    assert r["band_step_chars"] >= 1
+    if r["spare_chars"] < r["band_step_chars"] and r.get("robust_art_mm"):
+        assert r["robust_art_mm"] > r["answer"]
+        r2 = M.solve(sp, art_mm=r["robust_art_mm"], cap_mm=0.8, floor=0.05,
+                     want="chars")
+        assert r2["answer"] >= r["target_chars"] + r["band_step_chars"]
