@@ -17,6 +17,26 @@ its hyphen) and newlines collapse to single spaces, because `fp_text` is one lin
 and the shape flow re-breaks the text anyway. The figures are renders of the
 resulting KiCad footprint geometry, not of the PDF.
 
+`examples/bitcoin_whitepaper_abstract_s1.txt` is the same paper, one section
+earlier: the **Abstract** followed by Section 1, *Introduction*, joined by a
+` -- ` separator. Same author, same source `bitcoin.pdf`, same **MIT License**,
+same attribution line above.
+
+> Attribution: Satoshi Nakamoto, <https://bitcoin.org/bitcoin.pdf>
+
+2923 characters with whitespace collapsed — 1120 of Abstract, the 4-character
+separator, then the 1799 characters of `bitcoin_whitepaper_s1.txt` verbatim.
+The file is one line and one trailing newline, so its sha256 depends on which
+newline the checkout has — `84737658cf…6146b98` with CRLF,
+`65e8f18e2a…89f537` with LF. The character count above does not, and it is the
+number the tools work from.
+Modified in exactly the two ways the shorter file is, and no others: line-end
+hyphenation of the original typesetting is rejoined, and newlines collapse to
+single spaces. It is the sizing load for the microprinting solve — the passage
+that does **not** fit a 2.5 in Bitcoin mark, which is what makes it useful — and
+it is **not** the text rendered in the three figures above; those are Section 1
+alone.
+
 `examples/bitcoin_b.svg` is a 614-byte, three-shape (rounded square, disc, path)
 rendition of the Bitcoin currency mark. **Its origin is not recorded**: it has
 been in the tree since the initial commit `ff41777` and no commit body names a
