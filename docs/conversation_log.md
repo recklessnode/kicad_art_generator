@@ -1420,6 +1420,13 @@ There is no tolerance anywhere in the fit check.
 
 ### Level 2 was not reached, and nobody should look for it in this framework
 
+> **Superseded 2026-08-20 — see "The spectre reaches the plane" at the end of
+> this log.** Everything measured below is correct and none of it is retracted;
+> the phrase doing the damage is "in this framework". The framework was missing
+> the substitution's per-generation *reflection*, which makes the quad map
+> anti-linear and its growth invisible to every linear eigenvalue sweep recorded
+> here. `SPECTRE_AUDITED_LEVEL` is now 5, at 34 649 tiles.
+
 `SPECTRE_VERIFIED_LEVEL` stays at **1**. A level-2 patch was built — 71 tiles,
 the published count, zero overlaps, one boundary loop, no holes, no reflected
 tile — and rejected on compactness at **64 % hull fill** against 80.4 % for a
@@ -1464,6 +1471,12 @@ count-based check passes — but if the labels carry different quads then the qu
 is not one vector under one linear map and the growth argument does not apply to
 the real system. Restoring the nine labels, each with its own quad, is the thing
 to try.
+
+> That hypothesis was tried on 2026-08-20 and is **wrong**: the published system
+> shares one quad across all nine labels, and the nine labels *without* the
+> reflection give 9 overlapping pairs at level 2 and 1908 at level 3 — worse than
+> the two-cluster collapse. The two-cluster collapse *with* the reflection is
+> clean. See the entry at the end of this log.
 
 A quad-free direct fit was also tried and is explicitly **not** evidence: all
 three runs (1752, 2030 and 10004 complete placements) were stopped by their own
@@ -1600,3 +1613,425 @@ ramp's L\* gate does not handle, so issue **#1** needs a coupon per mask colour
 rather than one coupon.
 
 Nothing committed this pass either; all of it is in the working tree.
+
+## 2026-08-20 — The spectre reaches the plane: it was a missing reflection
+
+`SPECTRE_AUDITED_LEVEL = 5`. The substitution runs to arbitrary depth and level 5
+— **34 649 tiles** — is audited pair by pair with exact integer predicates in
+`Z[sqrt 3]`: zero overlapping pairs, zero proper edge crossings, zero
+strictly-interior vertices, one boundary loop, no holes, no edge claimed by three
+or more tiles, no tile a mirror image of any other. Level 6 (272 791 tiles) was
+checked with the cheaper exact oracles and is clean too.
+
+| lvl | tiles | candidate pairs | crossings | interior verts | overlapping pairs |
+|----:|------:|----------------:|----------:|---------------:|------------------:|
+| 0 | 1 | 0 | 0 | 0 | 0 |
+| 1 | 9 | 21 | 0 | 0 | 0 |
+| 2 | 71 | 209 | 0 | 0 | 0 |
+| 3 | 559 | 1845 | 0 | 0 | 0 |
+| 4 | 4401 | 15 339 | 0 | 0 | 0 |
+| 5 | 34 649 | 124 201 | 0 | 0 | 0 |
+
+Level 3 is the line that matters: it used to report **97 overlapping pairs, 128
+proper edge crossings, 520 strictly-interior vertices, 25 edges shared by three
+or more tiles and 7 boundary loops**.
+
+### What was wrong
+
+One line. This module built the substitution out of **rotations and translations
+only**. The published substitution composes a **reflection** onto all eight slot
+transforms at every generation — the paper says so in one sentence, *"the rules of
+Figure 2.1 reverse all tile orientations"* — so successive levels alternate
+handedness. Without it the anchor quad grew by exactly **3.0** per level where the
+tile counts force `sqrt(4 + sqrt(15)) = 2.805884`; the eight children were pushed
+6.9 % too far apart every level; level 2 came out as three disconnected lumps at
+64 % hull fill, and level 3 self-overlapped.
+
+Adding `z_conj()` — complex conjugation in `Z[d]`, which is exact and integral,
+because conjugation permutes the twelfth roots of unity — and one composition
+step is the entire fix.
+
+### Why every previous search came back empty, correctly
+
+The ledger recorded that all 32⁴ = 1 048 576 super-quad rules were swept with no
+eigenvalue of modulus 2.805884, that 1794 re-derived chain descriptions all
+failed the same test, and that the anchor quad is forced. **None of that is
+retracted.** Every one of those was a search over *linear* quad maps. With a
+reflection in the chain the one-step quad map is **anti-linear** — `z -> A·conj(z)
++ b` — and its growth lives in the eigenvalues of `A·conj(A)`, which no linear
+eigenvalue sweep can see. The searches were sound; the framework they searched
+was the defect.
+
+### The nine labels were not the fix — a second honest negative result
+
+Issue #8's hypothesis was that collapsing the nine metatile labels (Γ, Δ, Θ, Λ,
+Ξ, Π, Σ, Φ, Ψ) into two was the defect, and that restoring them *each with its
+own quad* was what would inflate correctly. It is wrong, and it is wrong for a
+reason that can be read straight off the published table: every row places Γ at
+slot 7 and nowhere else, and only Γ's row drops a slot, so by induction all eight
+non-Γ supertiles are the **identical point set** at every level. Nine labels, two
+geometries — exactly what the two-cluster code already had. The published system
+also shares **one** quad across all nine labels.
+
+Measured on both diagonals of the 2 × 2, same quad, same super-quad rule, same
+chain rules:
+
+| labels | reflection | level 2 | level 3 |
+|---|---|---|---|
+| nine | no | 9 overlapping pairs | 1908 overlapping pairs |
+| nine | **yes** | 0 | 0 |
+| two | **yes** | 0 | 0 |
+
+Nine labels *without* the reflection are worse than two clusters without it were.
+Two clusters *with* it are clean. The reflection is necessary and sufficient; the
+labels are neither. They are implemented anyway — they are the published system,
+they cost nothing, and they carry the hierarchy bookkeeping the aperiodicity
+argument needs — but the ledger says what the measurement says.
+
+One number in the earlier report is also corrected: the reflected quad growth was
+described as "2.805884 from the first step, exactly". It **converges** —
+2.827766, 2.808774, 2.806253, 2.805931, … → 2.805883701 — never more than 1 %
+out. The rotation-only 3.0, by contrast, is exactly 3.0 from the second step on,
+which is the tell that it is a different eigenvalue rather than a near miss.
+
+### Five oracles, and a negative control
+
+The failure mode being guarded against is *"a count-based check passed a broken
+implementation for months"*, so nothing rests on tile counts. Levels were checked
+with: the repo's exact predicates on doubled `Z[sqrt 3]` integers; a second exact
+implementation written from scratch over `Fraction`-based `Q(sqrt 3)` with a
+different in-polygon algorithm; an exact combinatorial census (every unit edge
+claimed by at most two tiles, every lattice vertex carrying at most 360° of tile —
+integer arithmetic, since all interior angles are multiples of 30°); shapely's
+`unary_union`; and dense uniform point sampling.
+
+All five were first pointed at the **known-broken** level 3 and all five fired:
+97 / 97 overlapping pairs from the two exact ones, 55 vertices over 360° with a
+worst of 720°, 201.7 mm² of area lost to overlap, 7248 doubly-covered sample
+points. An oracle that cannot fail is not evidence. The angle census is now in
+the module as `spectre_vertex_census()` — O(n), exact, and cheap enough to run at
+level 6.
+
+### What it buys the board
+
+`spectre-fingerprint` used to refuse a 150 × 100 mm board at `--tile-mm 3`: 71
+tiles could not span it, the smallest tile that would span was 11.674 mm, and at
+that size six tiles survived the copper mask. That is why `spectre-cells` had to
+exist. The mode now picks the shallowest level that **covers** the frame and puts
+**1564 whole 3 mm tiles** on the same board, with no repetition and no rescaling.
+Re-measured 2026-08-24 through `spectre_region_fill`, which is what fills a board
+today; `spectre_fingerprint` refuses this frame rather than clamping to a level
+that only spans it, so the figure quoted here is no longer reachable by that call.
+
+Covers, not spans: a real spectre supertile is ragged — it fills 0.8146, 0.8040,
+0.7076, 0.6510, 0.6266, 0.6177 of its convex hull at levels 0…5, converging to
+about 0.61 — so a patch whose *bounding box* contains the frame can still leave
+centimetre-wide bays of bare board inside it. Both the fingerprint and the
+window-filling `spectre` kind now test containment in the patch's **boundary
+polygon**. Before that, a 14 × 14 mm window at `--tile-mm 4` came back with a
+hole in it.
+
+The old supertile acceptance test — hull fill ≥ 0.75 — had to go for the same
+reason: it was calibrated on a lone tile and a 9-tile cluster and it *rejects
+correct objects*. It is replaced by what it was standing in for and what the old
+level 2 actually failed: one boundary loop, no holes, no edge shared by three
+tiles. `spectre-cells` keeps working, with a smaller cell — its pitch was
+`15 + 13√3` and is now `27(1 + √3)/2` unit edges, because the corrected 71-tile
+patch is one compact lump instead of three sprawling ones. Boards previously
+generated with that kind will not reproduce bit-for-bit.
+
+### Aperiodicity
+
+The strict xfail `test_spectre_has_no_translational_symmetry` said *"a 9-tile
+cluster is far too small to scan; needs a correct level 2"*. It is now a real
+assertion on the 559-tile level-3 patch: hundreds of candidate translations, best
+score 0.13, zero exact repeats, on a scan the periodic kinds are calibrated to
+score exactly 1.0. Still evidence and not a proof — a finite patch cannot rule
+out a symmetry of the infinite tiling — and the module still says so.
+
+### Provenance
+
+The rule table, chain rules, anchor quad, super-quad recursion and the reflection
+are the published mathematics of Smith, Myers, Kaplan and Goodman-Strauss, *A
+chiral aperiodic monotile* (arXiv:2305.17743, Combinatorial Theory 4(2), 2024),
+implemented here from that mathematics. Kaplan's reference application was
+consulted as an existence proof and a source of test vectors — to confirm the
+nine-row table, and to measure that this module's vertex numbering is the
+published one shifted by 12 and turned 30°, which is why `SPECTRE_QUAD_IDX` moved
+from `(3, 7, 11, 13)` to `(5, 7, 9, 13)`. No source was copied from it.
+
+Nothing committed this pass; all of it is in the working tree.
+
+## 2026-08-21 — Filling a region: whole tiles to the perimeter, and what the cards can actually hold
+
+The plane-tiling defect was fixed last pass. This pass turns it into the thing the
+board owner asked for: *give me a region and a tile size, and fill it*. Step 1 of
+his three-step pipeline — tile the plane, discard partials at the perimeter,
+remove what the art cuts — was the one that did not exist. Steps 2 and 3 already
+worked.
+
+### The entry point
+
+`spectre_region_fill(region, tile_mm, seed=0, keepouts=(), reject=None)` in
+`tools/tilings.py`. `region` is a ring or a rect; it returns the tiles and a
+ledger — `offered`, `dropped_partial`, `dropped_keepout`, `kept`, `coverage`.
+
+Two things in it are worth stating rather than assuming.
+
+**The region is a polygon, not a bounding box.** `spectre_fingerprint()` asks
+whether the patch contains the frame's *rectangle*. A card is not a rectangle:
+the alpha coupon's hexagonal corners stick 7.3 mm past its own flats, so asking
+for the bounding box makes the deflation go a level deeper than the card needs,
+and a level is a factor of 7.9 in tiles. `spectre_region_placement()` tests
+containment of the outline itself, in the patch's own boundary polygon — the
+raggedness matters and the bounding box still is not the test.
+
+**`offered` means touching the region.** Counting every tile whose bounding box
+met the region's bounding box reported 1205 offered and 443 partials on the alpha
+hexagon at 3 mm, when only 905 tiles come near the card and only 143 are cut by
+its outline. The ledger now closes: `offered = kept + dropped_partial +
+dropped_keepout`.
+
+`place="most-tiles"` is an opt-in second placement rule. Where the patch sits
+under the outline is a free parameter — at 15 mm a 94 mm card is a speck inside a
+level-3 patch — and it is worth a fifth of the field at that size: measured over
+12 rotations and a 15×15 offset grid, alpha takes 19–21 whole tiles centred
+against 24 at the best offset at 15 mm, and 757–765 against 770 at 3 mm. It is
+not the default because the default has to be restatable in one sentence.
+
+### The answer to the target: 3 mm on one face, 15 mm on the other
+
+Face area is the outline less the 0.5 mm copper-to-edge inset, less the routed
+ASIC cutout: **alpha 7348.2 mm², beta 7563.2 mm²**. FIELD is the tiling alone;
+ART is what survives the card's own copper, mask, silk, buried copper and cutout,
+each grown by the 0.55 mm add-mode clearance.
+
+FIELD % / ART %, tiles in brackets. The rotation is the one each face already
+uses, which is why the two beta faces have different FIELD numbers.
+
+| tile | alpha front | alpha back | beta front | beta back |
+|---|---|---|---|---|
+| 15 mm | 55.1 / **0.0** (18 → 0) | 55.1 / **6.1** (18 → 2) | 62.5 / **3.0** (21 → 1) | 53.6 / **0.0** (18 → 0) |
+| 9 mm | 71.7 / 1.1 (65 → 1) | 71.7 / 27.6 (65 → 25) | 75.0 / 9.6 (70 → 9) | 73.9 / 16.1 (69 → 15) |
+| 6 mm | 78.4 / 7.8 (160 → 16) | 78.4 / 43.6 (160 → 89) | 84.3 / 18.6 (177 → 39) | 82.4 / 29.0 (173 → 61) |
+| 3 mm | 89.9 / **22.9** (734 → 187) | 89.9 / **62.0** (734 → 506) | 90.8 / **30.8** (763 → 259) | 90.8 / **50.8** (763 → 427) |
+
+Today's cards carry one 71-tile level-2 patch per face: 3.13 % and 15.85 % on
+alpha, 6.84 % and 15.40 % on beta, measured the same way. With
+`place="most-tiles"` the 3 mm faces go to 24.3 % and the 15 mm backs to 9.2 %
+(alpha) and 3.0 % (beta) — the placement search maximises whole tiles in the
+*region*, so it can trade a tile away against the art, and beta's front loses
+four (259 → 255) that way.
+
+The sanity check the brief supplied holds, once one number in it is corrected: a
+hexagon of 94 mm across flats is `√3/2 × 94²` = **7652 mm²**, not 8844 — 8844 is
+94², which is the bounding box's own scale and 15.5 % too big. Perfect packing at
+15 mm is therefore ~33 tiles, not 39, against 18 realised; at 3 mm, 850, against
+905 offered and 734 kept; and 6 mm lands on 160–177 tiles, which is the ~200
+legible tiles of the owner's reference image.
+
+**15 mm is too bold for these cards, and the reason is not coverage.** The field
+itself is fine — 55–62 % of the face, the rest being the whole-tile rim, which at
+a 21.5 × 16.9 mm tile is up to 21 mm deep and cannot be otherwise. What kills it
+is the *art*: the four lines of marking text on each back run the width of the
+card, and a 21 mm tile cannot get between them. Alpha's back keeps 2 tiles of 18;
+beta's keeps none of 18. At 6 mm the same faces keep 89 and 61.
+
+### Verification of the emitted field
+
+Every claim measured on the emitted millimetre rings, not on the ring algebra
+that produced them. At the two target sizes, on all four faces: **0 overlapping
+pairs** (of 2 524–2 683 tested), 0 duplicates, **0 reflected**, **0 not congruent
+to Tile(1,1)**, 0 tiles outside the region, every tile exactly `tile_mm²`. The
+congruence test is rebuilt from the reference tile's edge lengths and turn angles
+in float millimetres with an independent in-polygon test, so it catches a clipped
+tile, a mirrored tile and a rescaled one with one measurement.
+
+`gap_audit` on the field with no keepouts: **one boundary loop, no holes, no
+broken chains** on every face and size. That is the exact half of "reaches the
+perimeter". The visible half is a raster: uncovered 629 mm² on alpha at 3 mm, none
+of it more than **4.78 mm** from the outline — 1.6 tile widths — and **zero bays**
+deeper than two tiles. Beta: 679 mm², 4.88 mm, zero bays. The one deep pocket
+anywhere is alpha's ASIC cutout, which is a hole in the card.
+
+The depth test needed a fix of its own: without padding the raster,
+`distance_transform_edt` measures to the nearest zero pixel *inside the array*, so
+a region touching the border borrows a depth from the far side of the shape — the
+4 mm strip along the hexagon's bottom flat came back as a 27 mm bay.
+
+**No periodicity.** The blind scan is exhaustive over translations, because a
+symmetry must carry one chosen centre onto another: alpha 3 mm best score 0.7306
+over 671 candidates, beta 0.7784 over 449, **zero exact repeats** on either. A hex
+lattice filled into the same region at the same size scores **1.0000 with 384
+exact repeats** on beta. On alpha the same control tops out at 0.9860, because the
+scan erodes a rectangle out of the centre and a hexagon leaves that rectangle's
+corners empty — the control has to be run on the card's own shape or it credits
+the spectre for the shape of the card.
+
+### Two things found on the cards
+
+**`build_coupons.py` cannot rebuild.** Its `patch()` calls
+`T.spectre_fingerprint(frame, tile_mm, seed=turn)` with the level-2 patch's own
+bounding box as the frame and asserts 71 tiles. Since `SPECTRE_PATCH_LEVEL`
+became 5 the level search runs, the level-2 boundary cannot contain its own
+bounding box, and the call now returns **153 rings from level 5**. The fix is
+`levels=2` in that one call. Not made here — the coupons were not to be rebuilt
+this pass.
+
+**An ink-derived keepout cannot see a patch defined by the absence of ink.** T5
+is bare board and draws nothing, by definition. Measured: one 3 mm tile lands
+inside beta's T5 tone patch. Alpha's T5 cell survives only because the T6 and T7
+cells beside it and the silk frame around it are ink. Those patches need
+declaring as keepouts, not deriving. Both cards' silkscreen also states "spectre
+L2 · 71 tiles · tile 4.05 mm", which is a marking that would have to change.
+
+Renders of all four faces at 3/6/9/15 mm are in the scratch bench, not the repo.
+Nothing committed this pass; all of it is in the working tree.
+
+
+## 2026-08-21 — The sizing solve, and the word that was hardest to break
+
+Two changes to `tools/microtext.py`, and the first one is why the second one was
+worth having. Nothing committed; nothing rebuilt.
+
+### The hyphen was four defects, not a missing feature
+
+The flow split the body on whitespace only, so `peer-to-peer` — the word with
+the most built-in break points in the whitepaper's opening sentence — was one
+atomic 12-character unit and the **hardest word in the text to place**. When it
+fitted no span it jammed every span after it, because the flow never skips a
+word.
+
+`--shape-hyphenate` searched for a break position `k` and emitted `w[:k] + "-"`.
+For `peer-to-peer` at `hyphen_min` 3 that runs k = 9..3:
+
+| k | head | tail | what it does |
+|---|---|---|---|
+| 8 | `peer-to--` | `peer` | doubles a hyphen the author wrote |
+| 7 | `peer-to-` | `-peer` | inserts one where the author already had one |
+| 5 | `peer--` | `to-peer` | doubles it again |
+
+and `hyphen_min` compounded it: the natural segment `to` is two letters, so even
+a correct "break at the author's hyphen" would have refused that break — a rule
+about how much of a *word* to leave on a line, applied where nothing is inserted
+and no word is divided.
+
+A **fourth** defect turned up when the recovery walk was pointed at the legacy
+loop: it put an unplaceable carried fragment back into `tail` and then went on
+filling the span from `words[wi]`, which is the text *after* the fragment. So
+the board carried a later word first. Reproduced exactly, on a three-band mask:
+
+    legacy  ['Int-', 'has', 'ernet', 'come to']     board reads "Int-hasernet..."
+    now     ['Int-', 'ernet', 'has', 'come to']
+
+Both flows are in `tests/test_microtext.py`: `legacy_flow()` is the pre-repair
+walk spliced back in verbatim, so every "it used to do X" here is an assertion
+about a runnable object. **Eight of the new tests fail against it and pass
+against the repair.**
+
+### The fix, and what existing-hyphen breaking recovers on its own
+
+The body is now split at its existing hyphens **always** — independent of
+`--shape-hyphenate`, independent of `hyphen_min` — into pieces that each carry
+the hyphen that ends them. `peer-to-peer` is `["peer-", "to-", "peer"]` and
+`"".join()` is the word, character for character. Breaking between them is
+ordinary typesetting. Algorithmic hyphenation is what is left over: only for a
+piece still too wide on its own, still behind the flag.
+
+Measured on `examples/bitcoin_b.svg` element 2 at the `jlcpcb-4l-fine` floor cap
+of 0.790 mm, 1:8 stroke, 1/21 em tracking, **with `--shape-hyphenate` OFF**:
+
+| art | before | after | recovered |
+|---|---|---|---|
+| B 63.5 mm, Abstract+Intro | 1053 chars, 33/51 bands | **1319, 46/51** | +266 chars, +13 bands |
+| B 76.2 mm, Abstract+Intro | 1934, 54/61 | **2023, 58/61** | +89, +4 |
+| B 30.0 mm, Abstract | 68, 6/19 | **106, 11/19** | +38, +5 |
+| B 40.0 mm cap 2.0, Abstract | 9, 2/13 | **22, 4/13** | +13, +2 |
+
+The last row is the case the owner found: nine glyphs from the entire Abstract.
+None of that recovery changes a character of the text.
+
+### The flag stays OFF, and now there is a number for it
+
+It is worth **0.0%–11.7%** of capacity after the repair (63.5 mm: 6.5%;
+76.2 mm: 3.4%), against the ~25% that existing-hyphen breaking now delivers for
+free. But the argument is not the percentage. The algorithm breaks on **width,
+not syllables**, and this is what it does to the whitepaper:
+
+    contro-lled   unavoidab-le.   netwo-rk,   weaknes-ses   transact-ions,
+    instituti-ons   tru-sted   prop-ose   anot-her   Int-ernet
+
+Those are not hyphenations a reader would accept; they are misspellings in two
+pieces, at a size nobody proof-reads. And at the art size that actually holds
+the text the owner wants — 90.4 mm, below — the flag buys **0.0%** and the mark
+fills every band without it. It only matters when the art is too small for the
+text, which is a sizing problem, and sizing now has its own answer.
+
+Every inserted hyphen is recorded by word, warned about, and counted; a break at
+an existing hyphen is counted too and explicitly **not** disclosed as an
+alteration, because it is not one.
+
+### Capacity is exact, and the verdict comes before the flow
+
+`check()` now measures the shape's **character capacity** and reports the
+verdict at the top of the report; an overfilling body is refused there rather
+than after the work. The number is not an estimate. The flow is causal, so
+running it over the body repeated until the art overflows gives the longest
+prefix of that prose the art takes, character for character — verified by
+cutting the body to exactly that length and re-flowing it. `FlowSpan.consumed`
+records the prefix boundary at every span, and `_flow()` asserts the running
+count and the leftover text add up to the body. Capacity costs 10–75 ms.
+
+Capacity is **not** a property of the shape alone: the same 2.5 in B at the same
+cap holds 1404 characters of the Abstract and 1319 of Abstract+Introduction,
+because greedy wrapping turns on where the word boundaries fall.
+
+`solve()` exposes the same arithmetic with nothing emitted — `--solve` on the
+command line, the unknown being whichever of `--shape-height` / `--height` /
+`--text` is left out:
+
+    art + cap        -> characters it holds, and the shortest text that fills it
+    cap + characters -> how big the art has to be
+    art + characters -> the largest cap the text survives
+
+Every answer is bisected on measured flows, snapped to a grid (0.05 mm art,
+0.005 mm cap), and then **re-run at the value printed**. The three directions
+close on each other: 63.5 mm + 0.79 mm gives 1319 characters; 1319 characters at
+0.79 mm gives 63.25 mm, which is the smallest size that holds them.
+
+### The owner's case: a 2.5 in B, Abstract + Introduction, at the floor
+
+**It does not fit, and no cap height makes it fit.** The floor cap for this body
+at 1:8 with 1/21 em tracking on `jlcpcb-4l-fine` is 0.790 mm, and a 63.5 mm B
+holds **1319** characters of that prose. The text is 2923. Two numbers:
+
+- **grow the art to 90.40 mm** (58.31 × 90.40 mm, 3.56 in) — capacity 2925,
+  2 characters of slack, and full anywhere from 2916 characters up; verified
+  by re-running the flow on the real body at that size;
+- or **cut exactly 1604 characters** (237 words) from the end.
+
+A finer cap is not on the table: 0.790 mm *is* the floor, limited by the `i`'s
+own stem-to-tittle gap against 0.0889 mm. What a 2.5 in B does hold at that cap
+is the **Abstract alone** (1120 chars against 1404 of capacity, 10 bands blank —
+it underfills) or about 1319 characters of the two together.
+
+So the tool now recommends, rather than only reporting. **Overfill: grow the
+art.** It is the only one of the three fixes that neither walks the letterforms
+toward the process floor nor deletes a word. **Underfill: raise the cap.** It
+moves every stroke and counter *away* from the floor, so the part gets easier to
+build, and it leaves the art footprint the board already committed to alone.
+Both remedies are computed and both are verified by re-running the flow.
+
+### Nothing is altered without saying so, and it is provable
+
+`recover_text()` walks the strings that will be fabricated back against the
+source in reading order and allows exactly two differences: an inter-word space
+the flow consumed at a span end, and an inserted hyphen **that was declared**.
+`place()` runs it and **refuses the part** if it does not close. So a break at an
+existing hyphen has to round-trip with no allowance at all — measured on the B at
+63.5 and 76.2 mm, it does — while an inserted one fails unless it is in the
+report. Fed the old worked example, board `for` / `non-rever-` against source
+`for non-reversible payments`, it returns ok False with nothing declared and
+truncated 14 with one declared. Neither is a pass. Run against the legacy walk,
+the emit path now refuses outright: *"the text on the board does not walk back to
+the source: 3 inserted hyphen(s) on the board, 0 declared."*
