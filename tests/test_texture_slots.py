@@ -232,6 +232,14 @@ FRAME = (51.80, 26.40, 202.20, 126.00)      # SatoshiStarter, inset 1.0 mm
 SPAN_TILE = 11.6743
 
 
+def _outside(tile_bbox, frame):
+    """generate()'s own whole-tile rule, for the cases that must PIN the level
+    and so cannot go through generate()."""
+    bx0, by0, bx1, by1 = tile_bbox
+    return (bx0 < frame[0] or by0 < frame[1]
+            or bx1 > frame[2] or by1 > frame[3])
+
+
 def test_the_board_first_kinds_are_named_and_gated():
     """Handing a board-first kind a per-layer permitted bbox would destroy the
     only property it has, so the choice is made by kind and not by the caller."""
@@ -286,16 +294,26 @@ def test_tile_ledger_counts_the_stage_that_used_to_be_invisible():
 
     The old report counted tiles only AFTER tilings.generate()'s frame filter, so
     under a board-anchored frame every tile hanging over the board outline
-    vanished between two numbers that both looked right. On this board's frame at
-    the smallest spanning tile, that is 27 of the 71.
+    vanished between two numbers that both looked right.
+
+    The counts here moved when the spectre substitution was corrected: 71 tiles
+    was every tile the module had, and SPAN_TILE was the size at which those 71
+    spanned this board.  The fingerprint now picks the shallowest level that
+    COVERS the frame -- level 4 at this tile size -- and offers the part of that
+    patch which reaches the frame at all.  The ledger's job is unchanged and is
+    what this test is about: offered, in-frame, and the difference must reconcile
+    exactly, with nothing clipped.  The difference is now the board-edge overhang
+    and nothing else, which is a better number than it used to be: it used to
+    include every tile of the patch that was nowhere near the board.
     """
     opts = tb.TextureOptions(tiling="spectre-fingerprint", tile_mm=SPAN_TILE,
                              seed=0)
     offered = tb.tiles_offered(tilings, opts, FRAME)
     inframe = tilings.generate("spectre-fingerprint", FRAME, SPAN_TILE, 0)
-    assert offered == 71
-    assert len(inframe) == 44
-    assert offered - len(inframe) == 27
+    assert tilings.spectre_fingerprint_placement(FRAME, SPAN_TILE, 0)[0] == 4
+    assert offered == 138
+    assert len(inframe) == 85
+    assert offered - len(inframe) == 53
 
 
 def test_the_refusal_stops_the_run_with_its_own_exit_code(monkeypatch, tmp_path):
@@ -320,6 +338,61 @@ def test_the_refusal_stops_the_run_with_its_own_exit_code(monkeypatch, tmp_path)
     rc = tb.main_texture(a, parser, object())
     assert rc == 5
     assert not out.exists()
+
+
+def test_the_documented_tile_counts_are_the_measured_ones():
+    """R3.  The module docstring and --help quoted numbers nobody had measured.
+
+    Both said "a 4401-tile level-4 patch of which 1331 are entirely inside the
+    frame", at --tile-mm 3 on this board. Neither figure was right for either
+    candidate frame: 4401/level 4 is what the BOUNDING-BOX test picked before it
+    was replaced by a coverage test, and 1331 was measured on nothing at all.
+
+    THE REPLACEMENT PROSE WAS ALSO WRONG, in a subtler way, and that is why this
+    test now asserts the refusal too. It said the coverage test "picks level 5
+    ... for both frames" at tile_mm 3.0. The COUNTS were right for a level-5
+    patch and are still asserted below -- but at tile_mm 3.0 and seed 0 the
+    coverage test picks NOTHING for either frame. Level 5 spans both and covers
+    neither, missing 3.687 mm2 of one and 6.098 mm2 of the other. The auto rule
+    returned 5 anyway because it seeded its answer with SPECTRE_PATCH_LEVEL and
+    could not tell a fallen-through search from a successful one. So the counts
+    are the PINNED level-5 counts and the docstring has to say so.
+
+    Prose that quotes a measurement has to be checked against the measurement,
+    or it decays into a story. So this asserts the numbers AND asserts that the
+    text says them.
+    """
+    want = {}
+    for name, frame in (("inset 1.0", FRAME), ("inset 0.5", CELL_FRAME)):
+        with pytest.raises(tilings.SpectreCoverageError) as e:
+            tilings.spectre_fingerprint_placement(frame, 3.0, 0)
+        assert e.value.reason == "cover", name
+        rings = tilings.spectre_fingerprint(frame, 3.0, 0, levels=5)
+        inframe = [r for r in rings
+                   if not _outside(tilings.bbox_of(tilings._open(r)), frame)]
+        want[name] = (e.value.levels, len(rings), len(inframe))
+    assert want == {"inset 1.0": (5, 1778, 1552),
+                    "inset 0.5": (5, 1805, 1582)}
+    assert tilings.spectre_patch_size(5) == 34649
+    # the two thresholds the refusal hands the caller, which the text quotes
+    assert tilings.spectre_cover_tile_mm(150.4, 99.6, 5, 0) == pytest.approx(
+        3.086404, abs=1e-6)
+    assert tilings.spectre_cover_tile_mm(151.4, 100.6, 5, 0) == pytest.approx(
+        3.117392, abs=1e-6)
+
+    doc = tb.__doc__
+    for n in ("34649", "1778", "1552", "1805", "1582",
+              "3.086404", "3.117392", "3.687", "6.098", "2295.021"):
+        assert n in doc, "the module docstring no longer quotes %s" % n
+    # the counts may not be quoted as the AUTO rule's answer any more
+    assert "PINNED" in doc and "REFUSES BOTH FRAMES" in doc
+    # 4401 may still appear, but only inside the paragraph that retracts it
+    assert doc.count("4401") == 1
+    assert doc.index("An earlier draft") < doc.index("4401")
+
+    help_text = tb.build_parser().format_help()
+    assert "34649" in help_text
+    assert "4401" not in help_text
 
 
 def test_the_cli_offers_the_frame_override():
@@ -376,18 +449,22 @@ def test_the_cell_grid_is_board_first_like_the_one_patch_mode():
 def test_the_cell_grid_ledger_accounts_for_every_offered_tile():
     """offered -> outside the frame -> (masked) -> placed, with nothing clipped.
 
-    852 = 71 tiles x 12 cells, and the 176 that hang over the board outline are
+    852 = 71 tiles x 12 cells, and the ones that hang over the board outline are
     DROPPED whole. The ledger has to reconcile exactly, because the stage that
     used to be invisible is precisely where a clipped tile would hide.
+
+    121 hang over, where it used to be 176: the corrected level-2 patch is one
+    compact lump instead of three sprawling ones, so the cell is smaller and more
+    of each cell's patch lands inside the frame.
     """
     opts = tb.TextureOptions(tiling="spectre-cells", tile_mm=3.0, seed=0)
     offered = tb.tiles_offered(tilings, opts, CELL_FRAME)
     inframe = tilings.generate("spectre-cells", CELL_FRAME, 3.0, 0)
     assert offered == 71 * 12 == 852
-    assert len(inframe) == 676
-    assert offered - len(inframe) == 176
+    assert len(inframe) == 731
+    assert offered - len(inframe) == 121
     # the ledger's arithmetic, not just its inputs
-    assert max(0, offered - len(inframe)) == 176
+    assert max(0, offered - len(inframe)) == 121
 
 
 @pytest.mark.skipif(not tb.HAVE_PCBNEW,
@@ -467,8 +544,16 @@ def test_the_fingerprint_stamp_names_the_board_state():
     assert '("area"' not in block, "the ambiguous label is back"
     assert "NOT_QUITE_SUPERTILE" in block
     assert "supertile" in tb.NOT_QUITE_SUPERTILE
-    assert "97" in tb.NOT_QUITE_SUPERTILE      # level 3 self-overlaps
-    assert "0.6405" in tb.NOT_QUITE_SUPERTILE  # and it fails compactness
+    # This used to require "97" (level 3's overlapping pairs) and "0.6405" (the
+    # hull fill it failed compactness on).  Both were true of a broken
+    # substitution -- see tools/tilings.py -- and the stamp must not go on
+    # claiming them once they are not.  What it has to carry now is the evidence
+    # that the patch is sound: the count, the exactness, and the depth.
+    assert "71 tiles" in tb.NOT_QUITE_SUPERTILE
+    assert "Z[sqrt 3]" in tb.NOT_QUITE_SUPERTILE
+    assert "0 overlapping pairs" in tb.NOT_QUITE_SUPERTILE
+    assert "97" not in tb.NOT_QUITE_SUPERTILE
+    assert "0.6405" not in tb.NOT_QUITE_SUPERTILE
 
 
 def test_a_wall_that_cuts_to_nothing_is_a_loud_failure_not_a_pass():
