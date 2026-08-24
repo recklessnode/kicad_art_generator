@@ -107,19 +107,90 @@ MEASURED on SatoshiStarter @ 0694274, add mode, tile 11.6743 mm, seed 10:
     rings are bit-identical (worst vertex displacement 0.000e+00 mm). That is
     the fingerprint property, measured rather than asserted.
 
-AND THE PART THAT IS NOT GOOD NEWS. The patch must SPAN the board -- a repeated
-patch is periodic at the patch pitch and throws away the only reason to use a
-spectre -- and 71 tiles span a 150 x 99 mm board only at tile_mm >= 11.674 mm.
-At that size a tile is 16.7 mm across, so:
+THE PART THAT USED TO BE BAD NEWS, and what changed. The patch must SPAN the
+board -- a repeated patch is periodic at the patch pitch and throws away the only
+reason to use a spectre -- and when 71 tiles was every tile tilings.py had, that
+forced tile_mm >= 11.674 on a 150 x 99 mm board, i.e. a tile 16.7 mm across. At
+that size:
 
-  * subtract mode places NOTHING at any legal tile size (its permitted region is
+  * subtract mode placed NOTHING at any legal tile size (its permitted region is
     694 mm2 on F.Cu in 4 fragments; no whole 11.7 mm spectre tile fits any of
     them), measured at 11.674, 12, 12.5, 13, 13.1, 14, 16 and 20 mm;
-  * add mode places 1 to 6 tiles per layer depending on seed;
-  * at tile 3.0 mm the run REFUSES, with the numbers: spanning would need level
-    4, and level 3 is not constructible (97 overlapping tile pairs).
+  * add mode placed 1 to 6 tiles per layer depending on seed;
+  * at tile 3.0 mm the run REFUSED, because spanning needed level 4 and level 3
+    was not constructible -- it self-overlapped in 97 pairs.
 
-So this mode is a large-format medallion, not a texture. Use hex for texture.
+The spectre substitution in tilings.py has since been corrected (it was missing
+the per-generation reflection) and now runs to level 5, 34649 tiles, audited.
+spectre_fingerprint asks the shallowest level whose BOUNDARY POLYGON contains
+the frame -- covers, not spans: the bounding box is not a coverage test for a
+patch this ragged. A LEVEL-5 PATCH AT tile_mm 3.0 PUTS THIS MANY TILES IN THIS
+REPO'S TWO CANDIDATE FRAMES, at rotation 0:
+
+  * board outline deflated 1.0 mm, 150.4 x 99.6 mm: 1778 tiles reach the frame,
+    1552 are entirely inside it;
+  * board outline deflated 0.5 mm, 151.4 x 100.6 mm: 1805 reach it, 1582 inside.
+
+No repetition and no rescaling: the mode is a texture again rather than a
+large-format medallion.
+
+BUT THOSE ARE PINNED NUMBERS -- levels=5 -- AND AT tile_mm 3.0, SEED 0, THE AUTO
+RULE REFUSES BOTH FRAMES. Read that before quoting the counts. An earlier draft
+of this paragraph said the auto rule "picks the shallowest level that COVERS the
+frame ... and at tile_mm 3.0 that is level 5 ... for both of this repo's
+candidate frames". The counts were right; that sentence was not. What is
+measured, at rotation 0, tile_mm 3.0, the patch centred on the frame:
+
+  * level 4 SPANS both frames -- its bbox is 318.054 x 322.978 mm -- and its
+    boundary misses 2295.021 mm2 of the 1.0 mm frame in 2 components (1615.385
+    and 679.636) and 2373.657 mm2 of the 0.5 mm frame in 2 components (1664.932
+    and 708.725). So "level 4 leaves two bays" is confirmed as a COUNT for both
+    frames; "several hundred mm2", said of the pair, understates the larger by
+    a factor of three.
+  * level 5 spans both frames AND STILL DOES NOT COVER EITHER: 3.687 mm2 in 2
+    components (3.414, 0.273) of the 14979.840 mm2 frame, and 6.098 mm2 in ONE
+    component of the 15230.840 mm2 frame. 0.025% and 0.040%.
+  * so the coverage search returns None, and it did not "pick 5". The old code
+    returned 5 because spectre_fingerprint_placement() seeded its answer with
+    SPECTRE_PATCH_LEVEL before searching and could not tell a search that fell
+    through from a search that succeeded. That clamp is fixed: the auto rule now
+    raises SpectreCoverageError with reason="cover".
+
+Areas above are measured twice -- by tilings._ring_contains_rect for the
+yes/no and by shapely 2.1.2 boolean difference on the same boundary ring for the
+areas -- and the two agree on every case.
+
+THE MECHANISM IS ESTABLISHED ONLY THIS FAR, and the rest is not asserted here.
+Every uncovered component at BOTH levels touches the frame's own edge -- the
+level-5 ones the bottom edge, the level-4 ones the top-and-right and top-and-
+left corners. None is an enclosed interior bay. The earlier "bays of bare board
+INSIDE it" is wrong in that respect too: they are edge notches, and what the
+whole-tile rule does with the frame perimeter is drop it anyway. Whether the
+coverage test SHOULD distinguish an edge notch from an enclosed bay is an open
+question and this module does not answer it: the test is containment,
+containment fails, and the rule refuses. Why the boundary notches at rotations
+0, 3, 6 and 9 and not at the other eight is NOT established, and is not guessed
+at here.
+
+WHAT TO DO WHEN IT REFUSES, all measured on the 150.4 x 99.6 mm frame:
+
+  * raise --tile-mm to 3.086404 (3.117392 for the 0.5 mm inset frame). The
+    threshold is 2.9% away, not a level away, and the refusal quotes it --
+    spectre_cover_tile_mm() is where it comes from. At the threshold the auto
+    rule resolves to level 5 with no pin and places 1467 tiles.
+  * or change the seed. Coverage is rotation-dependent: at tile_mm 3.0 level 5
+    covers this frame at 8 of the 12 turns and fails at turns 0, 3, 6 and 9.
+    seed % 12 is the turn, so seed 1 covers and places 1565.
+  * or pass levels=5 and own the notches, which is what the counts above do.
+
+Do NOT read a coverage refusal's min_tile_mm as a span number. They are not
+close: the same frame and level SPAN at 0.561439 mm and COVER at 3.086404 mm,
+5.5x apart, and acting on the span number leaves you still refused. The
+exception carries reason="span" or reason="cover" to tell them apart.
+
+(An earlier draft also said "a 4401-tile level-4 patch of which 1331 are
+entirely inside the frame". That tile count and level are what the bbox test picked
+before a coverage test replaced it; 1331 was measured on nothing at all.)
 
 WHOLE TILES ONLY -- WHAT THIS HALF OWES PART 2
 ----------------------------------------------
@@ -2764,21 +2835,21 @@ def render_fingerprint_png(rings, board_bbox_mm, out_path, px_per_mm=12.0,
 
 # The honest label, in one place so both the caption and the report say the
 # same thing. Requirement (b) asked for "the Spectre not-quite-supertile that
-# represents the board", and "not-quite" is doing real work:
+# represents the board", and "not-quite" used to be doing real work: the old
+# level-2 patch was three disconnected lumps filling 64% of their hull, and
+# inflating it a third time produced 97 overlapping tile pairs.
 #
-#   a SUPERTILE is a substitution unit -- it must tile again, so it has to be
-#   compact (one boundary loop, no holes, hull fill near 1). The level-2 patch
-#   fails all three: hull fill 0.6405, one loop but a void of about 21 tile
-#   areas inside it, and inflating it a third time produces 97 overlapping tile
-#   pairs. spectre_patch_audit(3) measured that.
-#
-# So the patch is a valid PATCH -- 71 tiles with pairwise-disjoint interiors,
-# proved by integer predicates in Z[sqrt 3] -- and not a supertile, and the
-# image must not claim otherwise.
+# That was a defect in the substitution, not a property of the spectre, and it
+# has been fixed -- tilings.py was missing the per-generation reflection. The
+# patch IS a supertile now: one boundary loop, no holes, no edge claimed by
+# three tiles, and it inflates cleanly to level 5 (34649 tiles) with zero
+# overlapping pairs under exact integer predicates. The name of this constant is
+# kept so nothing downstream breaks; the text it carries is what is true.
 NOT_QUITE_SUPERTILE = (
-    "not-quite-supertile: level 2 is a valid PATCH (71 tiles, 0 overlapping "
-    "pairs by exact integer predicates) but NOT a substitution unit -- hull "
-    "fill 0.6405 with an interior void, and level 3 self-overlaps in 97 pairs")
+    "supertile: level 2 is 71 tiles with pairwise-disjoint interiors, one "
+    "boundary loop and no holes, proved by exact integer predicates in "
+    "Z[sqrt 3], and the same substitution runs to level 5 (34649 tiles) with "
+    "0 overlapping pairs")
 
 
 # --- the run ------------------------------------------------------------------
@@ -3375,14 +3446,22 @@ def build_parser():
                         "texture emission. Two kinds are BOARD-FIRST -- their "
                         "field is anchored to the board outline, not fitted to "
                         "the layer's permitted region. spectre-fingerprint is "
-                        "ONE level-2 patch spanning the board, which fails "
-                        "loudly if it cannot span at --tile-mm rather than "
-                        "repeating or rescaling it; at the size that spanning "
-                        "forces, only single figures of tiles survive the "
-                        "copper mask and the field cannot resolve a board. "
-                        "spectre-cells is the usable one: a level-2 patch per "
-                        "cell of a 13.10446*tile_mm grid, so --tile-mm is free "
-                        "and the field is large enough to be sensitive")
+                        "ONE spectre patch centred on the board, at the "
+                        "shallowest substitution level whose BOUNDARY POLYGON "
+                        "covers the frame -- covers, not spans. A level-5 "
+                        "patch is 34649 tiles, of which about 1550 to 1580 "
+                        "land wholly inside a 150 x 100 mm board at "
+                        "--tile-mm 3; but at --tile-mm 3 and --seed 0 NO level "
+                        "covers that board and the run refuses -- raise "
+                        "--tile-mm to 3.087 or change --seed, both of which "
+                        "the refusal spells out. It fails loudly rather than "
+                        "repeating, rescaling, or returning a level whose "
+                        "coverage it never checked. It is the one to use. "
+                        "spectre-cells puts a level-2 patch in each cell of a "
+                        "12.88302*tile_mm grid; it predates the substitution "
+                        "being fixed and buys resolution by giving up "
+                        "aperiodicity between cells, which is no longer a "
+                        "trade anyone has to make")
     p.add_argument("--tile-frame", choices=["auto", "board", "permitted"],
                    default="auto",
                    help="rectangle the tiling is generated over. permitted: "
@@ -3781,16 +3860,28 @@ def main_texture(a, parser, ing_opts):
         print("\nSPECTRE FINGERPRINT REFUSED -- no board was written.",
               file=sys.stderr)
         print(str(exc), file=sys.stderr)
+        # LABEL THE THRESHOLD BY WHICH REFUSAL THIS IS. There are two, they are
+        # far apart -- 0.561 mm to span this board from level 5, 3.086 mm to
+        # cover it -- and calling a coverage threshold a span threshold sends
+        # the caller to a tile size that still refuses.
         if exc.min_tile_mm:
-            print("\n  smallest --tile-mm that spans this board: %.3f"
-                  % exc.min_tile_mm, file=sys.stderr)
+            print("\n  smallest --tile-mm that %s this board: %.3f"
+                  % ("COVERS" if getattr(exc, "reason", "span") == "cover"
+                     else "spans", exc.min_tile_mm), file=sys.stderr)
         print("  requested --tile-mm: %.3f   patch %.2f x %.2f mm   frame "
               "%.2f x %.2f mm"
               % (exc.tile_mm, exc.patch_mm[0], exc.patch_mm[1],
                  exc.frame_mm[0], exc.frame_mm[1]), file=sys.stderr)
-        print("  level a correct substitution would need at that tile: %s "
-              "(this framework cannot build level 3)"
-              % exc.needed_level, file=sys.stderr)
+        if getattr(exc, "reason", "span") == "cover":
+            print("  the patch SPANS this frame and its boundary polygon does "
+                  "not contain it; how deep a patch would be needed to cover "
+                  "an arbitrary frame is NOT established, so no level is "
+                  "quoted here. Coverage is rotation-dependent -- try another "
+                  "--seed -- or pin the level and own the uncovered rim.",
+                  file=sys.stderr)
+        else:
+            print("  level a correct substitution would need at that tile: %s"
+                  % exc.needed_level, file=sys.stderr)
         return 5
     except NoCutError as exc:
         # Same contract as the refusal above: nothing written, and the numbers
@@ -3948,6 +4039,20 @@ def print_add_report(a, tex, results, textures, timings, rbox):
                  lt.add_pct_of_permitted, lt.add_pct_of_board, lt.add_pieces))
     print("  islands = separate copper polygons emitted, one PCB_SHAPE each. "
           "Net: %s." % (tex.add_net or "none -- the copper is floating"))
+    # THE TOLERANCE ON THE WHOLE-TILE RULE, MADE VISIBLE. place_tiles() accepts
+    # a tile whose area outside the permitted region is <= tol_mm2 (1e-6), and
+    # its docstring justifies that by saying the worst accepted residual is
+    # "reported so that a tolerance quietly admitting partly-outside tiles would
+    # be visible as a residual near the tolerance rather than at zero". It was
+    # not reported anywhere: the field was set and never read, so the tolerance
+    # on the module's ONLY contract between its two halves was unmonitored. A
+    # number sitting at 0.0e+00 is the evidence; a number creeping toward 1e-6
+    # is the warning that justification promised.
+    print("  worst residual accepted by the whole-tile rule (tolerance "
+          "%.0e mm2): %s"
+          % (1e-6, ", ".join("%s %.3e" % (lt.layer_name,
+                                          lt.worst_accepted_residual_mm2)
+                             for lt in textures)))
 
     print("\nREQUIREMENT 2: DOES THE GROUND PLANE MOVE?")
     h3 = ("%-8s %-16s %12s %12s %12s %10s %8s" %
