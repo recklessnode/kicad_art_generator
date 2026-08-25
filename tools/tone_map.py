@@ -88,6 +88,31 @@ DEFAULT_TOL_DE = 10.0
 # it is a colour nobody declared.
 DEFAULT_UNMAPPED_BUDGET_PCT = 0.25
 
+# A declared merge that ERASES a feature is refused past this much of the ink
+# (issue #17: satoshi_points' chest S, drawn only in the shading gold, merged
+# into the body gold and was not drawn at any size -- while every check
+# passed, because every check measured ink that was DRAWN, and merged ink is
+# drawn, just in its neighbour's colour). MEASURED across the three Satoshi
+# characters, sidecar mappings as declared (points as declared before the
+# 2026-08-24 S repair): the erased chest-S glyphs total 0.553 % of ink on
+# satoshi_points, 0.343 % on little_satoshi, 0.326 % on satoshi_miner, while
+# the worst enclosed antialias speckle that survives the enclosure test is a
+# single pixel, 0.0006 %. 0.05 sits in that three-decade gap: 6.5x under the
+# smallest real erasure, 80x over the measured speckle.
+MERGE_ERASED_FAIL_PCT = 0.05
+
+# A component counts as ENCLOSED when at least this fraction of its drawn
+# border (border against opaque ink; the silhouette against background is
+# excluded, because that edge is the merge partner's silhouette too and
+# survives the merge unchanged) is the very ink it merged into. MEASURED on
+# the three Satoshi characters: every genuinely erased feature -- the chest-S
+# strokes, drawn only in shading gold and surrounded by body gold -- reads
+# exactly 1.000, and everything that keeps a visible edge reads 0.969 or
+# less (satoshi_points' rim crescent 0.000: it lies between two runs of the
+# drawn black outline; satoshi_miner's helmet dome 0.921 and hatband 0.969:
+# both meet the black outline). 0.98 is the middle of that measured gap.
+MERGE_ENCLOSED_MIN_FRAC = 0.98
+
 
 class ToneMapError(ValueError):
     pass
@@ -128,6 +153,12 @@ class Ink:
     merge_ok: tuple[str, ...] = ()     # hexes of other declared inks it may share with
     off_palette: bool = False          # acknowledges d_weighted >= OFF_PALETTE_DE
     legibility: str = ""               # "declared" acknowledges |dL| < LEGIBLE_MIN_DL
+    erase_ok: bool = False             # acknowledges the merge ERASES this ink's
+                                       # enclosed features (issue #17). merge_ok
+                                       # says "share a tone"; it does not say
+                                       # "and the feature disappears" -- that is
+                                       # a second, bigger loss and needs its own
+                                       # sentence.
     note: str = ""
 
     @property
@@ -216,8 +247,11 @@ class ToneMap:
         for ink in sorted(self.inks, key=lambda i: i.hex):
             merges = ",".join(sorted(rgb_to_hex(_hex_to_rgb(m))
                                      for m in ink.merge_ok))
+            # erase_ok is appended only when set, so every map written before
+            # the key existed keeps the digest its shipped footprints carry.
             rows.append(f"{ink.hex}>{ink.tone}|m={merges}|"
-                        f"o={int(ink.off_palette)}|l={ink.legibility}")
+                        f"o={int(ink.off_palette)}|l={ink.legibility}"
+                        + ("|e=1" if ink.erase_ok else ""))
         return (f"{self.mask}#tol={self.tol_de:g}#"
                 f"budget={self.unmapped_budget_pct:g}#"
                 f"inner={int(self.inner_ok)}#" + ";".join(rows))
@@ -235,6 +269,8 @@ class ToneMap:
                                    for m in ink.merge_ok]
             if ink.off_palette:
                 row["off_palette"] = True
+            if ink.erase_ok:
+                row["erase_ok"] = True
             if ink.legibility:
                 row["legibility"] = ink.legibility
             if ink.note:
@@ -260,6 +296,7 @@ class ToneMap:
                 rgb=_hex_to_rgb(r["rgb"]), tone=str(r["tone"]),
                 merge_ok=tuple(str(m) for m in (r.get("merge_ok") or ())),
                 off_palette=bool(r.get("off_palette", False)),
+                erase_ok=bool(r.get("erase_ok", False)),
                 legibility=str(r.get("legibility") or ""),
                 note=str(r.get("note") or "")))
         return ToneMap(
@@ -443,6 +480,13 @@ def map_labels(img, tmap: ToneMap, palette, *, min_alpha: int = 128):
                                "mix_max_res": MIX_MAX_RES, "tol_de": tol}},
     }
 
+    # (6) DISTINGUISHABILITY of declared merges (issue #17). Every other
+    # check in this file measures ink that is drawn; a merged ink is drawn,
+    # just in its neighbour's colour, so a feature drawn ONLY in it can
+    # vanish while every drawn-ness number stays perfect. This census is the
+    # check that measures the vanishing, and the caller gates it.
+    stats["merge_erasure"] = _merge_erasure(ink_of, opaque, tmap)
+
     # (5) POST-ASSERTION, on the OUTPUT rather than on the domain. Every label
     # that exists is a tone that draws, unless a declared ink named the
     # background on purpose. This is an internal error, not a warning: if it
@@ -460,6 +504,117 @@ def map_labels(img, tmap: ToneMap, palette, *, min_alpha: int = 128):
             f"declared ink asked for -- artwork would be lost silently")
 
     return labels, opaque, stats
+
+
+def _shift(m: np.ndarray, dy: int, dx: int) -> np.ndarray:
+    """`m` moved by (dy, dx), padding with False: off-image is background."""
+    out = np.zeros_like(m)
+    h, w = m.shape
+    ys = slice(max(dy, 0), h + min(dy, 0))
+    xs = slice(max(dx, 0), w + min(dx, 0))
+    yd = slice(max(-dy, 0), h + min(-dy, 0))
+    xd = slice(max(-dx, 0), w + min(-dx, 0))
+    out[ys, xs] = m[yd, xd]
+    return out
+
+
+def enclosed_components(member_of, opaque, k: int, group: set[int]) -> list[dict]:
+    """The connected regions of ink ``k`` and who owns each region's border.
+
+    ``member_of`` maps each pixel to an ink index (-1 = nothing). For every
+    8-connected component of ``member_of == k``, its border pixels-adjacencies
+    are classified three ways: against another member of ``group`` (the inks
+    this one declared merge_ok with), against any OTHER opaque ink, and
+    against background. ``enclosure`` is group / (group + other) -- the share
+    of the component's DRAWN border that is the very ink it merges into.
+
+    Background border is excluded from the denominator on purpose: where a
+    merged region runs to the silhouette, that edge is the merge partner's
+    silhouette too, and it survives the merge unchanged. What makes a feature
+    visible after a merge is a border against a tone that renders differently
+    -- and only the "other" bucket has one. A component with NO drawn border
+    at all (a free-standing island) is not enclosed by anything and reads
+    enclosure 0.0.
+    """
+    import prep_assets
+
+    m = (member_of == k)
+    lbl, n = prep_assets._label8(m)
+    if n == 0:
+        return []
+    partner = np.isin(member_of, [i for i in group if i != k]) & opaque
+    other = opaque & (member_of != k) & ~partner
+    grp_b = np.zeros(n + 1, dtype=np.int64)
+    oth_b = np.zeros(n + 1, dtype=np.int64)
+    bg_b = np.zeros(n + 1, dtype=np.int64)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dy == 0 and dx == 0:
+                continue
+            nb_partner = _shift(partner, dy, dx)
+            nb_other = _shift(other, dy, dx)
+            nb_same = _shift(m, dy, dx)
+            nb_bg = ~(nb_partner | nb_other | nb_same)
+            grp_b += np.bincount(lbl[nb_partner & m], minlength=n + 1)
+            oth_b += np.bincount(lbl[nb_other & m], minlength=n + 1)
+            bg_b += np.bincount(lbl[nb_bg & m], minlength=n + 1)
+    px = np.bincount(lbl[m], minlength=n + 1)
+    out = []
+    for c in range(1, n + 1):
+        drawn = int(grp_b[c] + oth_b[c])
+        enc = (grp_b[c] / drawn) if drawn else 0.0
+        out.append({
+            "px": int(px[c]),
+            "border_partner": int(grp_b[c]),
+            "border_other": int(oth_b[c]),
+            "border_background": int(bg_b[c]),
+            "enclosure": round(float(enc), 4),
+            "erased": bool(drawn and enc >= MERGE_ENCLOSED_MIN_FRAC),
+        })
+    out.sort(key=lambda r: -r["px"])
+    return out
+
+
+def _merge_erasure(ink_of, opaque, tmap: "ToneMap") -> list[dict]:
+    """Per declared-merge ink: how much of it forms enclosed, erased regions.
+
+    Only non-dominant members of each merge group are examined: the group's
+    largest ink is the field the others disappear into, and a field is not a
+    feature. Antialias fringe between two inks is immune twice over -- blend
+    pixels resolve to one endpoint of the pair they actually blend, and
+    whatever slips through totals far under MERGE_ERASED_FAIL_PCT, which is
+    the caller's gate.
+    """
+    groups = tmap.merge_groups()
+    if not groups:
+        return []
+    idx_of = {ink.hex: i for i, ink in enumerate(tmap.inks)}
+    counts = np.bincount(ink_of[ink_of >= 0].ravel(), minlength=len(tmap.inks))
+    total = max(int(opaque.sum()), 1)
+    out = []
+    for g in groups:
+        idxs = [idx_of[h] for h in g]
+        field = max(idxs, key=lambda i: int(counts[i]))
+        gset = set(idxs)
+        for k in idxs:
+            if k == field or counts[k] == 0:
+                continue
+            comps = enclosed_components(ink_of, opaque, k, gset)
+            erased_px = sum(c["px"] for c in comps if c["erased"])
+            out.append({
+                "hex": tmap.inks[k].hex,
+                "tone": tmap.inks[k].tone,
+                "merged_into": [tmap.inks[i].hex for i in sorted(gset - {k})],
+                "ink_px": int(counts[k]),
+                "ink_pct": round(100.0 * int(counts[k]) / total, 4),
+                "erased_px": int(erased_px),
+                "erased_pct": round(100.0 * erased_px / total, 4),
+                "erase_ok": tmap.inks[k].erase_ok,
+                "components": comps[:12],
+                "n_components": len(comps),
+                "n_erased": sum(1 for c in comps if c["erased"]),
+            })
+    return out
 
 
 def _orphan_census(rgb, unmapped, total, palette):
