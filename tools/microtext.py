@@ -6,7 +6,7 @@ sweeps cap heights on a calibration coupon, but neither lets you PLACE microtext
 in a design. This does: a string, a cap height, a palette tone, and either a path
 to run along or a region to fill.
 
-The seven things this module exists to get right
+The eight things this module exists to get right
 ------------------------------------------------
 
 1. THE FLOOR IS ENFORCED, NOT SUGGESTED. The palette gives copper as the only
@@ -32,13 +32,17 @@ The seven things this module exists to get right
    coupon_ladders.SPECIMEN the binding glyph is 'e' (D = 0.147 em), and it binds
    BEFORE the stroke does -- which is precisely why that specimen was chosen.
 
-4. THE MASK OPENS OVER THE BLOCK, NEVER PER GLYPH. Mask registration is
-   +/-0.05 mm against a ~0.10 mm stroke. A per-glyph opening cannot survive
-   that; a block opening only has to place its own edge. So for any tone whose
-   recipe contains a mask layer, the letterforms go on the COPPER layer and the
-   mask layer gets one filled rectangle over the whole run. Two runs whose
-   openings would leave a sub-floor mask dam between them are merged into one
-   opening rather than left to wash away.
+4. THE MASK NEVER OPENS PER GLYPH. Mask registration is +/-0.05 mm against a
+   ~0.10 mm stroke. A per-glyph opening cannot survive that; an opening whose
+   edge stays a full bleed clear of every letterform only has to place its
+   own edge. So for any tone whose recipe contains a mask layer, the
+   letterforms go on the COPPER layer and the mask layer gets one filled
+   region: a rectangle over a line, path or region run, and for shape flow
+   the ART SILHOUETTE itself -- the union of the row spans the flow ran
+   against, grown by the bleed, with the counters kept masked (issue #15).
+   Two runs whose openings would leave a sub-floor mask dam between them are
+   merged into one opening rather than left to wash away, and a silhouette
+   whose lobes close to under the dam is refused for the same reason.
 
 5. WHETHER THE TEXT FILLS THE SHAPE IS A VERDICT, NOT A STATISTIC. Shape flow
    used to print "M/N mask spans filled" and stop, which reads identically
@@ -112,6 +116,19 @@ The seven things this module exists to get right
    undeclared hyphen, a dropped word or a scrambled order fails that walk and
    refuses the part.
 
+8. THE TEXT TRAVELS IN THE PART (issue #20). A placed body used to exist only
+   as geometry -- 1,638 of the whitepaper part's 1,644 characters were
+   recoverable from nothing but glyph coordinates. Every emit now stores
+   three footprint properties, in the serialisation KiCad 10's own writer
+   uses: Microtext (the author's text, verbatim, selectable in the editor),
+   MicrotextPlaced (the text as the board carries it, one line per run --
+   the only form that matches the geometry once a hyphen was inserted), and
+   MicrotextRecipe (JSON: text file, shape and element, cap, tracking,
+   stroke ratio, fab, hyphenation -- enough to regenerate). And the
+   integrity walk of point 7 is exposed from the artefact side: --recover
+   reads the glyphs back off any .kicad_mod in reading order, prints the
+   text, and proves it against the stored source when there is one.
+
 Tones
 -----
 Read from coupon_blocks.TONE_RECIPE, then split by layer class:
@@ -142,6 +159,9 @@ Usage
 
     # ... and how big would it have to be to hold all of that text?
     # (same command with --shape-height left off)
+
+    # read the text back off an emitted part, and prove it
+    python tools/microtext.py --recover out.kicad_mod
 """
 
 from __future__ import annotations
@@ -150,6 +170,7 @@ import argparse
 import json
 import math
 import pathlib
+import re
 import sys
 from dataclasses import dataclass, field
 
@@ -265,8 +286,10 @@ def plan_tone(tone: str, *, allow_buried: bool = False):
     if cu:
         text_layers = cu
         if mask:
-            notes.append(f"{tone}: letterforms on {'/'.join(cu)}, ONE block "
-                         f"opening on {'/'.join(mask)} -- gold on bare laminate")
+            notes.append(f"{tone}: letterforms on {'/'.join(cu)}, one mask "
+                         f"opening on {'/'.join(mask)} over the whole block "
+                         f"(shape flow: over the art silhouette) -- gold on "
+                         f"bare laminate")
         else:
             notes.append(f"{tone}: copper under mask, no opening -- covert, and "
                          f"immune to mask registration entirely")
@@ -599,6 +622,258 @@ def merge_openings(quads, dam):
     return cur, merged
 
 
+# --- the silhouette opening (issue #15) -------------------------------------
+#
+# The shape-mode mask opening follows the ART SILHOUETTE: the union of the row
+# band spans the flow ran against, each grown by the mask bleed. The helpers
+# here compute that union EXACTLY -- every vertex of the opening is a
+# coordinate the arithmetic produced, not a pixel a raster put near it -- and
+# then measure the one thing a polygon opening can get wrong that a rectangle
+# cannot: a strip of mask left narrower than the process dam.
+
+def _rect_union(rects):
+    """Exact union of axis-aligned rectangles. -> (loops, covered).
+
+    `loops` are the closed boundary loops in mm, collinear runs collapsed,
+    wound to emit_art's convention: signed_area < 0 is an outer boundary,
+    > 0 is a hole (a counter that stays masked). `covered((x, y))` answers
+    point-in-union, which is how the corridor check below tells a strip of
+    MASK between two opening edges from the inside of the opening itself.
+
+    Coordinate compression + boundary tracing rather than a raster union, on
+    purpose: the spans are already quantised once by the shape mask's own
+    raster, and a second quantisation here would put the opening edge up to a
+    pixel away from where the bleed arithmetic promised it.
+    """
+    import numpy as np
+    xs = sorted({v for r in rects for v in (r[0], r[2])})
+    ys = sorted({v for r in rects for v in (r[1], r[3])})
+    xi = {v: i for i, v in enumerate(xs)}
+    yi = {v: i for i, v in enumerate(ys)}
+    # cell (cj, ci) spans ys[cj-1]..ys[cj] x xs[ci-1]..xs[ci]; cj=0 / ci=0 and
+    # the top row/column past the last coordinate are the empty outside ring.
+    cov = np.zeros((len(ys) + 1, len(xs) + 1), dtype=bool)
+    for x0, y0, x1, y1 in rects:
+        if x1 <= x0 or y1 <= y0:
+            continue
+        cov[yi[y0] + 1: yi[y1] + 1, xi[x0] + 1: xi[x1] + 1] = True
+
+    # Directed boundary edges, covered region kept on the (dy, -dx) side --
+    # the winding that makes a plain rectangle come out with negative signed
+    # area, matching emit_art's outer/hole convention.
+    out_e: dict = {}
+
+    def add(v, d):
+        out_e.setdefault(v, []).append(d)
+
+    for i in range(len(xs)):
+        for j in range(len(ys) - 1):
+            left, right = cov[j + 1, i], cov[j + 1, i + 1]
+            if right and not left:
+                add((i, j), (0, 1))
+            elif left and not right:
+                add((i, j + 1), (0, -1))
+    for j in range(len(ys)):
+        for i in range(len(xs) - 1):
+            above, below = cov[j, i + 1], cov[j + 1, i + 1]
+            if above and not below:
+                add((i, j), (1, 0))
+            elif below and not above:
+                add((i + 1, j), (-1, 0))
+
+    loops = []
+    seen = set()
+    for start, dirs in list(out_e.items()):
+        for d0 in list(dirs):
+            if (start, d0) in seen:
+                continue
+            v, d = start, d0
+            pts = []
+            while True:
+                seen.add((v, d))
+                pts.append(v)
+                v = (v[0] + d[0], v[1] + d[1])
+                cand = out_e.get(v, ())
+                # Turn toward the covered side first. At an ordinary vertex
+                # exactly one continuation exists and the priority is inert;
+                # at a corner-touching crossing it keeps each covered lobe on
+                # its own simple loop. The successor rule is a bijection on
+                # directed edges, so the walk always returns to its start
+                # edge -- that, not the start vertex, is what closes a loop.
+                n = (d[1], -d[0])
+                for nd in (n, d, (-n[0], -n[1])):
+                    if nd in cand:
+                        d = nd
+                        break
+                else:
+                    raise AssertionError(
+                        "open boundary while tracing a rectangle union -- "
+                        "this is a bug in _rect_union, not in the shape")
+                if v == start and d == d0:
+                    break
+            out = []
+            m = len(pts)
+            for k in range(m):
+                p0, p1, p2 = pts[k - 1], pts[k], pts[(k + 1) % m]
+                if (p1[0] - p0[0], p1[1] - p0[1]) != (p2[0] - p1[0],
+                                                      p2[1] - p1[1]):
+                    out.append((xs[p1[0]], ys[p1[1]]))
+            if len(out) >= 3:
+                loops.append(out)
+
+    import bisect
+
+    def covered(p):
+        ci = bisect.bisect_left(xs, p[0])
+        cj = bisect.bisect_left(ys, p[1])
+        if ci <= 0 or cj <= 0 or ci >= len(xs) + 1 or cj >= len(ys) + 1:
+            return False
+        return bool(cov[cj, ci])
+
+    return loops, covered
+
+
+def _seg_closest(p, q, r, s):
+    """Closest points between non-crossing segments pq, rs. -> (d, on_pq, on_rs).
+
+    Ties are AVERAGED: two parallel overlapping edges achieve their distance
+    everywhere along the overlap, and the endpoint pair a naive argmin returns
+    sits exactly on whatever third edge joins them -- which is the one point
+    where "is the midpoint mask or opening" cannot be answered. The average
+    lands mid-overlap, where it can.
+    """
+    def pt_seg(pt, a, b):
+        vx, vy = b[0] - a[0], b[1] - a[1]
+        L2 = vx * vx + vy * vy
+        t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((pt[0] - a[0]) * vx +
+                                                   (pt[1] - a[1]) * vy) / L2))
+        cp = (a[0] + t * vx, a[1] + t * vy)
+        return math.hypot(pt[0] - cp[0], pt[1] - cp[1]), cp
+    cands = []
+    for pt, (a, b), flip in ((p, (r, s), False), (q, (r, s), False),
+                             (r, (p, q), True), (s, (p, q), True)):
+        d, cp = pt_seg(pt, a, b)
+        cands.append((d, cp, pt) if flip else (d, pt, cp))
+    dmin = min(c[0] for c in cands)
+    tied = [c for c in cands if c[0] <= dmin + 1e-12]
+    pa = (sum(c[1][0] for c in tied) / len(tied),
+          sum(c[1][1] for c in tied) / len(tied))
+    pb = (sum(c[2][0] for c in tied) / len(tied),
+          sum(c[2][1] for c in tied) / len(tied))
+    return dmin, pa, pb
+
+
+def _mask_corridors(loops, covered, radius):
+    """The narrowest strip of MASK between two opening edges. -> (mm, (x, y)).
+
+    (None, None) when no two edges face each other across mask within
+    `radius`. Two edges of the OPENING closer than the process dam, with mask
+    between them, is a web the fab cannot hold: it washes away and the two
+    lobes merge with an edge nobody drew. A rectangle opening could never do
+    this; a silhouette opening can, anywhere the silhouette pinches, so it is
+    measured here on the exact loops that will be emitted.
+
+    Two tests keep this honest, and each catches what the other cannot:
+
+      FACING. Every loop edge knows which side of it is mask (the loops are
+      wound with the opening on a fixed side). A pair of edges is a dam
+      candidate only if each one's mask side points at the other -- which is
+      what "two lobes closing" means. Without this, every staircase step the
+      band quantisation puts on the boundary reports its own corner pocket
+      as a corridor, because the pocket is mask and it is narrow; but that
+      pocket opens into the wide outside mask and no web is formed there.
+
+      COVERED. The midpoint of the closest approach must itself be mask.
+      Without this, two facing edges with a sliver of OPENING between them
+      -- the opening's own geometry, no mask involved -- would be reported.
+    """
+    edges = []
+    for li, lp in enumerate(loops):
+        n = len(lp)
+        for k in range(n):
+            a, b = lp[k], lp[(k + 1) % n]
+            ex, ey = b[0] - a[0], b[1] - a[1]
+            el = math.hypot(ex, ey)
+            if el <= 1e-12:
+                continue
+            mask_n = (ey / el, -ex / el)    # -(covered-side normal): the mask side
+            mask_n = (-mask_n[0], -mask_n[1])
+            edges.append((min(a[0], b[0]), li, k, n, a, b, mask_n,
+                          min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1])))
+    edges.sort(key=lambda e: e[0])
+    best, where = None, None
+    for u in range(len(edges)):
+        xu0, lu, ku, nu, a1, b1, m1, yu0, xu1, yu1 = edges[u]
+        for w in range(u + 1, len(edges)):
+            xw0, lw, kw, nw, a2, b2, m2, yw0, xw1, yw1 = edges[w]
+            lim = best if best is not None else radius
+            if xw0 - xu1 >= lim:
+                break                       # sorted by min-x: nothing closer follows
+            if lu == lw:
+                dk = abs(ku - kw)
+                if dk == 1 or dk == nu - 1:
+                    continue                # adjacent edges share a vertex
+            if yw0 - yu1 >= lim or yu0 - yw1 >= lim:
+                continue
+            d, pa, pb = _seg_closest(a1, b1, a2, b2)
+            if d <= 1e-9 or d >= lim:
+                continue
+            v = (pb[0] - pa[0], pb[1] - pa[1])
+            if v[0] * m1[0] + v[1] * m1[1] <= 1e-12:
+                continue                    # edge 1's mask side looks away
+            if v[0] * m2[0] + v[1] * m2[1] >= -1e-12:
+                continue                    # edge 2's mask side looks away
+            mid = ((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0)
+            if covered(mid):
+                continue                    # opening between them, not mask
+            best, where = d, mid
+    return best, where
+
+
+def _silhouette_openings(loops):
+    """Union loops -> fp_poly-ready outlines. -> (outlines, holes, unbridged).
+
+    A hole loop is a COUNTER -- the enclosed hole in a letter B -- and it
+    stays masked: it is joined to its outer by emit_art.bridge_holes' zero-
+    width fracture slit, the same keyhole form every tone fill in this tree
+    uses, rather than being filled over or emitted as a second polygon KiCad
+    would union away.
+    """
+    import numpy as np
+    import emit_art
+    outers, holes = [], []
+    for lp in loops:
+        a = np.asarray(lp, dtype=np.float64)
+        (outers if emit_art.signed_area(a) < 0 else holes).append(a)
+    buckets: list[list] = [[] for _ in outers]
+    unbridged = 0
+    for hp in holes:
+        best, best_a = -1, math.inf
+        for i, op in enumerate(outers):
+            oa = -emit_art.signed_area(op)
+            if oa >= best_a:
+                continue
+            if emit_art.point_in_poly(hp[0], op):
+                best, best_a = i, oa
+        if best >= 0:
+            buckets[best].append(hp)
+        else:
+            unbridged += 1
+    outs = []
+    for op, hs in zip(outers, buckets):
+        if hs:
+            merged, ub = emit_art.bridge_holes(op, hs)
+            unbridged += ub
+        else:
+            merged = op
+        # round to the writer's grid and drop the consecutive duplicates the
+        # rounding can mint -- two union vertices under 0.1 um apart are one
+        # point in the file, and verify_art counts the pair as a defect
+        merged = emit_art._round_dedupe(np.asarray(merged, dtype=np.float64))
+        outs.append([(float(x), float(y)) for x, y in merged])
+    return outs, len(holes), unbridged
+
+
 # --- the spec ---------------------------------------------------------------
 
 @dataclass
@@ -666,6 +941,11 @@ class MicrotextSpec:
     allow_buried: bool = False
     allow_unmeasured: bool = False
     run_tol_deg: float = DEFAULT_RUN_TOL_DEG
+    # Where `text` came from, when it came from a file (--text-file). Recorded
+    # in the emitted part's provenance property so the part can say which file
+    # to regenerate from; None means the text arrived inline and the property
+    # says so.
+    source_path: str | None = None
     # How this spec's flags are spelled on the command line that built it.
     # emit_art.py prefixes them, so a message that hard-codes "--text" sends the
     # reader looking for a flag that tool does not have.
@@ -2421,6 +2701,183 @@ def recover_text(source, placed, *, inserted=0):
             "source_chars": len(src), "board_chars": len(joined)}
 
 
+def _sexpr_parse(text):
+    """A .kicad_mod file -> nested lists; quoted strings arrive unescaped.
+
+    Enough parser for recovery and no more: atoms, quoted strings, KiCad's
+    backslash escapes. Local rather than pcbnew because recovery has to run
+    wherever the part is, and pcbnew's Python only exists inside a KiCad
+    install.
+    """
+    toks = re.findall(r'"(?:[^"\\]|\\.)*"|[()]|[^\s()"]+', text)
+    def unesc(t):
+        return re.sub(r"\\(.)",
+                      lambda m: {"n": "\n", "t": "\t",
+                                 "r": "\r"}.get(m.group(1), m.group(1)), t)
+    stack: list[list] = [[]]
+    for t in toks:
+        if t == "(":
+            new: list = []
+            stack[-1].append(new)
+            stack.append(new)
+        elif t == ")":
+            if len(stack) == 1:
+                raise MicrotextRefused("unbalanced ')' in the file")
+            stack.pop()
+        elif t.startswith('"'):
+            stack[-1].append(unesc(t[1:-1]))
+        else:
+            stack[-1].append(t)
+    if len(stack) != 1 or not stack[0]:
+        raise MicrotextRefused("unbalanced '(' in the file")
+    return stack[0][0]
+
+
+def recover_from_part(path):
+    """Read the text back OFF an emitted .kicad_mod, in reading order. -> dict
+
+    emit() proves the placed strings against the source with recover_text()
+    before a part ships -- and then the proof went down with the process while
+    the part lived on. This is the same walk run from the ARTEFACT: the
+    fp_text glyphs are read back in reading order, reassembled into runs, and
+    -- when the part carries its Microtext property -- walked against that
+    stored source with exactly the tolerance the emitter declared (the
+    inserted-hyphen count in MicrotextRecipe). A part that has lost its
+    inputs can still be read; a part whose geometry was edited since emit
+    fails the walk and says where.
+
+    Reads axis-aligned parts. A rotated path run is refused rather than
+    mis-ordered: reading order along a polyline is not derivable from anchor
+    coordinates alone.
+    """
+    p = pathlib.Path(path)
+    if not p.exists():
+        raise MicrotextRefused(f"{path}: no such file")
+    node = _sexpr_parse(p.read_text(encoding="utf-8"))
+    if not node or node[0] != "footprint":
+        raise MicrotextRefused(f"{p.name}: not a footprint (.kicad_mod)")
+
+    props: dict = {}
+    glyphs = []
+    for it in node[1:]:
+        if not isinstance(it, list) or not it:
+            continue
+        if it[0] == "property" and len(it) >= 3 \
+                and isinstance(it[1], str) and isinstance(it[2], str):
+            props[it[1]] = it[2]
+        elif it[0] == "fp_text" and len(it) >= 3 and isinstance(it[2], str):
+            sub = {c[0]: c for c in it if isinstance(c, list) and c}
+            at, layer = sub.get("at"), sub.get("layer")
+            if at is None or layer is None:
+                continue
+            x, y = float(at[1]), float(at[2])
+            ang = float(at[3]) if len(at) > 3 else 0.0
+            cap = None
+            for c in sub.get("effects", []):
+                if isinstance(c, list) and c and c[0] == "font":
+                    for cc in c:
+                        if isinstance(cc, list) and cc and cc[0] == "size":
+                            cap = float(cc[1])
+            glyphs.append((layer[1], x, y, ang, cap, it[2]))
+    if not glyphs:
+        raise MicrotextRefused(
+            f"{p.name}: no fp_text on the part -- nothing to read back")
+
+    from collections import Counter
+    lay = Counter(g[0] for g in glyphs).most_common(1)[0][0]
+    glyphs = [g for g in glyphs if g[0] == lay]
+    if any(abs(g[3]) > 0.01 for g in glyphs):
+        raise MicrotextRefused(
+            f"{p.name}: rotated fp_text on {lay} -- recovery reads "
+            f"axis-aligned parts (line, region and shape placements)")
+    caps = sorted(g[4] for g in glyphs if g[4])
+    if not caps:
+        raise MicrotextRefused(f"{p.name}: fp_text carries no font size")
+    cap = caps[len(caps) // 2]
+
+    recipe: dict = {}
+    if PROP_RECIPE in props:
+        try:
+            recipe = json.loads(props[PROP_RECIPE])
+        except ValueError:
+            recipe = {}
+
+    # Rows: cluster on y. Runs in one band share their anchor to the writer's
+    # four decimals and adjacent bands sit at least an ink height apart, so a
+    # quarter cap splits bands and never splits a band.
+    rows: list[list] = []
+    for g in sorted(glyphs, key=lambda g: (g[2], g[1])):
+        if rows and abs(g[2] - rows[-1][-1][2]) <= 0.25 * cap:
+            rows[-1].append(g)
+        else:
+            rows.append([g])
+    for r in rows:
+        r.sort(key=lambda g: g[1])
+
+    # One fp_text per glyph (tracking) or one per run? The recipe answers
+    # exactly; without one, a part that is >90% single-character strings is
+    # per-glyph -- no prose is.
+    per_glyph = sum(1 for g in glyphs if len(g[5]) == 1) > 0.9 * len(glyphs)
+    if "tracking_em" in recipe:
+        per_glyph = float(recipe["tracking_em"] or 0.0) != 0.0
+    space_adv = stroke_font.GLYPHS.get(" ", (0.4, None, None))[0]
+
+    def adv(ch):
+        return stroke_font.GLYPHS.get(ch, (stroke_font.MAX_ADVANCE_EM,
+                                           None, None))[0]
+
+    placed: list[str] = []
+    if not per_glyph:
+        for r in rows:
+            parts: list[str] = []
+            for g in r:
+                if parts and not parts[-1].endswith("-"):
+                    parts.append(" ")
+                parts.append(g[5])
+            placed.append("".join(parts))
+    else:
+        # Spaces are never emitted (they draw no ink), so they are read back
+        # from the pen: a step past advance+tracking by half a space is a
+        # space. After a hyphen no space is inferred -- a span that ends
+        # mid-word at a hyphen glues to the next span, and inventing a space
+        # there would turn 'non-'+'reversible' into a divergence.
+        t = float(recipe.get("tracking_em", 0.0) or 0.0)
+        if "tracking_em" not in recipe:
+            gaps = [(g1[1] - g0[1]) / cap - adv(g0[5])
+                    for r in rows for g0, g1 in zip(r, r[1:])]
+            t = max(0.0, min(gaps)) if gaps else 0.0
+        for r in rows:
+            buf = [r[0][5]]
+            for g0, g1 in zip(r, r[1:]):
+                extra = (g1[1] - g0[1]) / cap - adv(g0[5]) - t
+                if extra > 0.5 * (space_adv + t) and not buf[-1].endswith("-"):
+                    buf.append(" ")
+                buf.append(g1[5])
+            placed.append("".join(buf))
+
+    text = ""
+    for s in placed:
+        if text and not text.endswith("-"):
+            text += " "
+        text += s
+
+    out = {"file": str(p), "layer": lay, "cap_mm": cap, "rows": len(rows),
+           "glyphs": len(glyphs), "per_glyph": per_glyph, "placed": placed,
+           "text": text, "properties": sorted(props),
+           "recipe": recipe or None,
+           "source_property": PROP_TEXT in props, "integrity": None}
+    # The walk's tolerance model (consumed span-end spaces, declared hyphens)
+    # is the SHAPE flow's. A line run is the degenerate case of it; a region
+    # or path part REPEATS its string, so walking the repetitions against one
+    # copy of the source would report a divergence that is not one. Read
+    # those, don't judge them.
+    if PROP_TEXT in props and recipe.get("mode", "shape") in ("shape", "line"):
+        ins = len(recipe.get("inserted_hyphens") or [])
+        out["integrity"] = recover_text(props[PROP_TEXT], placed,
+                                        inserted=ins)
+    return out
+
+
 def _art_remedy(spec, floor, cap, target, axis, *, want, verify):
     """The art size that fixes this, MEASURED, with the flow that proves it.
 
@@ -2952,6 +3409,12 @@ def _runs_shape(spec, m, cap, rep):
         raise MicrotextRefused(
             f"no span in the shape was wide enough for a single word at a "
             f"{cap:.4f} mm cap height")
+    # Every span the flow ran against -- filled, narrow and abandoned alike.
+    # Their union IS the art silhouette as this flow saw it, and place() cuts
+    # the mask opening from exactly this list, so the opening and the text
+    # can never disagree about what the shape was. Private key: place() pops
+    # it before the report is serialised.
+    rep["_flow_spans"] = [(s.y, s.x0, s.x1) for s in fl.spans]
     return fl.runs
 
 
@@ -3086,6 +3549,7 @@ def place(spec: MicrotextSpec, rep: dict) -> tuple[list[Run], list[list], dict]:
 
     openings: list[list] = []
     rep["mask_bleed_mm"] = float(spec.mask_bleed_mm)
+    flow_spans = rep.pop("_flow_spans", None)
     if rep["mask_layers"]:
         # The run quads are CENTRELINE boxes, and half the pen sticks out past
         # every one of their edges. The bleed the caller asked for is clearance
@@ -3099,15 +3563,10 @@ def place(spec: MicrotextSpec, rep: dict) -> tuple[list[Run], list[list], dict]:
                 f"{MASK_REGISTRATION_MM} mm mask registration tolerance, so a "
                 f"worst-case misregistration puts the opening edge INSIDE the "
                 f"letterforms and the block stops being a block. Not clamped.")
-        if spec.mode in ("region", "shape"):
+        if spec.mode == "region":
             # One opening over the whole block: the doc's form 1, exactly.
-            # Shape flow gets the same treatment and for the same reason --
-            # mask registration is +/-0.05 mm against a ~0.10 mm stroke, so an
-            # opening that tried to follow the silhouette would need its edge
-            # placed to a tolerance the process does not have. The block
-            # opening only has to place its own four edges, and the shape is
-            # still drawn: it is drawn by the COPPER, which is what the reader
-            # sees as gold against bare laminate.
+            # A region IS a rectangle, so its silhouette and its bounding box
+            # are the same shape and there is nothing to follow.
             xs = [p[0] for r in runs for p in r.quad]
             ys = [p[1] for r in runs for p in r.quad]
             openings = [[(min(xs) - bleed, min(ys) - bleed),
@@ -3115,6 +3574,80 @@ def place(spec: MicrotextSpec, rep: dict) -> tuple[list[Run], list[list], dict]:
                          (max(xs) + bleed, max(ys) + bleed),
                          (min(xs) - bleed, max(ys) + bleed)]]
             rep["openings_merged"] = 0
+            rep["opening_form"] = "block"
+        elif spec.mode == "shape":
+            # The opening follows the ART SILHOUETTE (issue #15): the union of
+            # the row band spans the flow ran against, each grown by the bleed.
+            #
+            # This code used to cut one bounding-box rectangle here and argue
+            # registration for it. The registration argument was real but it
+            # was about the LETTERFORMS: an opening that hugged each glyph
+            # would need its edge placed against a ~0.10 mm stroke to a
+            # tolerance (+/-0.05 mm) the process does not have. The silhouette
+            # edge is not that edge. It lands in empty laminate between the
+            # outermost glyphs and the shape boundary, cleared from every
+            # glyph by the same bleed the block enjoyed, and there is still
+            # exactly one edge to register -- it just isn't a rectangle. What
+            # the rectangle actually cost was the artwork: the emitted part
+            # carried the whole shape as one bare-laminate block and left the
+            # silhouette to be inferred from the copper alone, when T3 (mask
+            # opening over bare laminate) is a tone this palette owns and the
+            # opening itself can draw the art.
+            #
+            # The spans already bound the INK -- flow reserves the half-pen on
+            # every side inside each span -- so the growth here is the asked-
+            # for bleed alone; adding the half-stroke again would overstate
+            # the clearance the report claims. A glyph that exactly fills its
+            # span touches the span edge, so the measured worst-case clearance
+            # IS spec.mask_bleed_mm, the same number the block delivered.
+            ink_h = rep["row_ink_mm"]
+            g = float(spec.mask_bleed_mm)
+            rects = [(x0 - g, y - g, x1 + g, y + ink_h + g)
+                     for (y, x0, x1) in flow_spans]
+            loops, covered_fn = _rect_union(rects)
+
+            # A polygon opening can do one thing a rectangle cannot: leave a
+            # web of mask thinner than the process dam wherever the silhouette
+            # pinches. Measured on the exact loops to be emitted, and refused
+            # -- a sub-dam web washes away and the lobes merge with an edge
+            # nobody drew.
+            dam, dam_src = FLOOR_MASK_DAM, "docs/pcb-palette.md"
+            fabrep = rep.get("fab")
+            if fabrep is not None and fabrep["min_mask_dam_mm"] is not None:
+                dam, dam_src = fabrep["min_mask_dam_mm"], fabrep["name"]
+            elif fabrep is not None:
+                rep["warnings"].append(
+                    f"{fabrep['name']} publishes no minimum mask dam; the "
+                    f"silhouette opening's narrowest mask web was checked "
+                    f"against the palette's {FLOOR_MASK_DAM:.2f} mm instead. "
+                    f"Ask the fab before ordering.")
+            rep["mask_dam_mm"] = dam
+            narrow, at_pt = _mask_corridors(loops, covered_fn, 2.0 * dam)
+            rep["mask_corridor_mm"] = narrow
+            if narrow is not None and narrow < dam - 1e-9:
+                raise MicrotextRefused(
+                    f"the silhouette opening leaves a {narrow:.3f} mm web of "
+                    f"mask near ({at_pt[0]:.2f}, {at_pt[1]:.2f}) mm, under "
+                    f"the {dam:.2f} mm mask dam ({dam_src}). Two lobes of "
+                    f"the opening close to less than the dam there, and a "
+                    f"web that thin washes away in processing -- the lobes "
+                    f"merge with an edge nobody designed. Widen the art "
+                    f"where it pinches, or reduce --{spec.flag_prefix}"
+                    f"mask-bleed (currently {g:.3f} mm) so the openings "
+                    f"stand further apart.")
+
+            openings, holes_kept, unbridged = _silhouette_openings(loops)
+            if unbridged:
+                raise MicrotextRefused(
+                    f"{unbridged} counter(s) in the silhouette opening could "
+                    f"not be joined to an outer boundary -- emitting them "
+                    f"would fill an enclosed hole with bare laminate that "
+                    f"the artwork keeps masked. This is a bug in the union, "
+                    f"not in the shape; do not ship the part.")
+            rep["openings_merged"] = 0
+            rep["opening_form"] = "silhouette"
+            rep["opening_holes"] = holes_kept
+            rep["opening_vertices"] = sum(len(o) for o in openings)
         else:
             # The dam decides which openings MERGE, so it is a sizing number,
             # not a warning: get it wrong and the emitted geometry is wrong.
@@ -3129,14 +3662,15 @@ def place(spec: MicrotextSpec, rep: dict) -> tuple[list[Run], list[list], dict]:
                         f"Assuming the palette's {FLOOR_MASK_DAM:.2f} mm would "
                         f"bake a guessed vendor limit into the geometry, which "
                         f"is exactly what tools/fab_profiles.py refuses to do. "
-                        f"Ask the fab, or use --{spec.flag_prefix}region / "
-                        f"--{spec.flag_prefix}shape, which cut ONE block "
-                        f"opening and never need a dam at all.")
+                        f"Ask the fab, or use --{spec.flag_prefix}region, "
+                        f"which cuts ONE block opening and never needs a dam "
+                        f"at all.")
                 dam, dam_src = fabrep["min_mask_dam_mm"], fabrep["name"]
             rep["mask_dam_mm"] = dam
             quads = [inflate_quad(r.quad, bleed) for r in runs]
             openings, merged = merge_openings(quads, dam)
             rep["openings_merged"] = merged
+            rep["opening_form"] = "runs"
             if merged:
                 rep["notes"].append(
                     f"{merged} pair(s) of run openings sat closer than the "
@@ -3188,6 +3722,105 @@ def _placements(spec: MicrotextSpec, run: Run, cap: float):
             out.append((ch, run.x + dx, run.y + dy, run.angle))
         pen += adv
     return out
+
+
+# --- footprint properties (issue #20) ---------------------------------------
+#
+# 1,638 of the whitepaper part's 1,644 placed characters existed only as
+# geometry; the descr named the first six words and everything else needed a
+# loupe. The text now travels IN the part, as footprint properties -- the one
+# KiCad container whose value survives a round trip through the editor and can
+# be selected and copied out of the properties panel.
+#
+# The serialisation was read back from KiCad 10's own writer, not invented:
+# a file carrying this exact token parses in pcbnew 10.0, GetFieldText()
+# returns the value -- including a newline stored as the two-character escape
+# \n -- and FootprintSave() re-emits the same form:
+#
+#   (property "Name" "Value" (at 0 0 0) (layer "F.Fab") (hide yes)
+#     (effects (font (size 1 1) (thickness 0.15))))
+#
+# (_property_item substitutes the part's own cap and stroke for KiCad's
+# 1 / 0.15 defaults -- see its docstring for why that is not cosmetic.)
+
+PROP_TEXT = "Microtext"          # the author's text, verbatim
+PROP_PLACED = "MicrotextPlaced"  # what the board carries: one line per run
+PROP_RECIPE = "MicrotextRecipe"  # JSON: everything needed to regenerate
+
+
+def _prop_escape(s):
+    """Escape a property value for a KiCad quoted string.
+
+    Unlike emit_art._sexpr_str this KEEPS newlines, as the \\n escape KiCad
+    itself writes -- PROP_PLACED is one line per run and flattening it would
+    destroy exactly the structure the property exists to preserve.
+    """
+    return (str(s).replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\r\n", "\n").replace("\r", "\n")
+            .replace("\n", "\\n").replace("\t", " "))
+
+
+def _property_item(name, value, cap_mm, stroke_mm):
+    """One footprint property as an ArtFp body item.
+
+    The font mirrors the part's own cap and stroke rather than KiCad's 1 mm /
+    0.15 mm default, and not for looks -- the field is hidden and never
+    plots. verify_art cross-checks every (thickness ...) token in the file
+    against what kicad-cli actually draws, and a hidden 0.15 mm pen the plot
+    can never show reads as PEN WIDTH DISAGREES on an otherwise clean part.
+    Mirroring keeps the file's set of stroke widths exactly the set the
+    board gets.
+    """
+    return ('\t(property "%s" "%s" (at 0 0 0) (layer "F.Fab") (hide yes) '
+            '(effects (font (size %.4f %.4f) (thickness %.4f))))'
+            % (_prop_escape(name), _prop_escape(value),
+               cap_mm, cap_mm, stroke_mm))
+
+
+def _recipe(spec: MicrotextSpec, rep: dict) -> dict:
+    """The provenance a part needs to be regenerated, or at least re-argued.
+
+    Everything here is a value the emit actually used, read from the spec and
+    the report -- not from the command line, which is gone six months later.
+    """
+    r = {
+        "tool": "kicad_art_generator tools/microtext.py",
+        "mode": spec.mode,
+        "tone": spec.tone,
+        "cap_mm": rep["cap_mm"],
+        "stroke_ratio": float(spec.stroke_ratio),
+        "stroke_mm": rep["stroke_mm"],
+        "tracking_em": float(spec.tracking_em),
+        "mask_bleed_mm": float(spec.mask_bleed_mm),
+        "fab": rep["fab"]["key"] if rep.get("fab") else None,
+        "floor_mm": rep["floor_mm"],
+        "text_file": spec.source_path,
+        "text_chars": len(spec.text),
+    }
+    if spec.mode == "shape":
+        r.update({
+            "shape": spec.shape.source,
+            "shape_mm": [spec.shape.width_mm, spec.shape.height_mm],
+            "shape_origin_mm": [float(v) for v in spec.shape.origin],
+            "shape_raster_px": [int(v) for v in spec.shape.grid.shape],
+            "shape_whole_band": bool(spec.shape_whole_band),
+            "hyphenate": bool(spec.hyphenate),
+            "hyphen_min": int(spec.hyphen_min),
+            "row_gap_mm": rep.get("row_gap_mm"),
+            # BOTH forms of every word this tool hyphenated: what the author
+            # wrote ("word") and what the board carries ("as_set"). Only the
+            # latter matches the geometry, and recovery needs the count.
+            "inserted_hyphens": rep.get("inserted_hyphens", []),
+        })
+    else:
+        r.update({"at": [float(v) for v in spec.at],
+                  "angle_deg": float(spec.angle_deg),
+                  "separator": spec.separator})
+        if spec.region is not None:
+            r["region"] = [float(v) for v in spec.region]
+        if spec.path is not None:
+            r["path"] = [[float(x), float(y)] for x, y in spec.path]
+    return r
 
 
 def emit(fp, spec: MicrotextSpec) -> dict:
@@ -3244,6 +3877,23 @@ def emit(fp, spec: MicrotextSpec) -> dict:
     rep["fp_text"] = len(placements) * len(rep["text_layers"])
     rep["fp_text_per_run"] = len(placements) / max(len(runs), 1)
 
+    # The text, IN the part (issue #20). The author's body verbatim, the body
+    # as placed (one line per run -- the only form that matches the geometry
+    # once a hyphen was inserted or a span-end space consumed), and the recipe
+    # to regenerate it. A second microtext block on the same footprint gets
+    # numbered names; KiCad treats duplicate property names as one field.
+    n_prev = sum(1 for it in fp.items
+                 if re.match(rf'\s*\(property "{PROP_TEXT}\d*" ', it))
+    sfx = "" if n_prev == 0 else str(n_prev + 1)
+    props = [(PROP_TEXT + sfx, spec.text),
+             (PROP_PLACED + sfx, "\n".join(r.text for r in runs)),
+             (PROP_RECIPE + sfx, json.dumps(_recipe(spec, rep),
+                                            sort_keys=True))]
+    for off, (nm, val) in enumerate(props):
+        fp.items.insert(off, _property_item(nm, val,
+                                            rep["cap_mm"], rep["stroke_mm"]))
+    rep["properties"] = [nm for nm, _ in props]
+
     # The geometry, handed back so a CALLER can audit it. microtext draws its
     # letterforms as fp_text -- a stroke-font instruction, not an outline -- so
     # nothing downstream can recover where the ink lands by parsing the
@@ -3283,7 +3933,7 @@ def print_report(rep, out=None):
         w(f"  note    : {n}\n")
     w(f"  tone    : {rep['tone']}  letterforms on "
       f"{'+'.join(rep['text_layers'])}"
-      + (f", block opening on {'+'.join(rep['mask_layers'])}"
+      + (f", mask opening on {'+'.join(rep['mask_layers'])}"
          if rep["mask_layers"] else ", no mask opening") + "\n")
     w(f"  floor   : {rep['floor_mm']:.3f} mm ({rep['floor_class']}) "
       f"[{rep['floor_note']}]\n")
@@ -3406,10 +4056,23 @@ def print_report(rep, out=None):
     w(f"\n  block   : {b[0]:.3f} x {b[1]:.3f} mm at "
       f"({rep['bbox_mm'][0]:.3f}, {rep['bbox_mm'][1]:.3f})\n")
     if rep["mask_layers"]:
-        w(f"  opening : {rep['openings']} block opening(s), "
-          f"{rep.get('mask_bleed_mm', DEFAULT_MASK_BLEED_MM):.3f} mm clear of "
-          f"the letterforms on every side (mask registration is "
-          f"+/-{MASK_REGISTRATION_MM} mm) -- over the block, never per glyph\n")
+        if rep.get("opening_form") == "silhouette":
+            w(f"  opening : the ART SILHOUETTE -- {rep['openings']} "
+              f"opening(s), {rep['opening_vertices']} vertices, "
+              f"{rep['opening_holes']} counter(s) kept masked, "
+              f"{rep.get('mask_bleed_mm', DEFAULT_MASK_BLEED_MM):.3f} mm "
+              f"clear of the letterforms (mask registration is "
+              f"+/-{MASK_REGISTRATION_MM} mm)\n")
+            if rep.get("mask_corridor_mm") is not None:
+                w(f"            narrowest mask web between opening lobes "
+                  f"{rep['mask_corridor_mm']:.3f} mm, above the "
+                  f"{rep['mask_dam_mm']:.2f} mm dam\n")
+        else:
+            w(f"  opening : {rep['openings']} block opening(s), "
+              f"{rep.get('mask_bleed_mm', DEFAULT_MASK_BLEED_MM):.3f} mm "
+              f"clear of the letterforms on every side (mask registration "
+              f"is +/-{MASK_REGISTRATION_MM} mm) -- over the block, never "
+              f"per glyph\n")
     if rep["mode"] == "shape":
         w(f"  shape   : {rep['shape_source']} via {rep['shape_raster_tool']}, "
           f"{rep['shape_mm'][0]:.3f} x {rep['shape_mm'][1]:.3f} mm, "
@@ -3792,6 +4455,13 @@ def main(argv=None) -> int:
                          "line and shape flow re-breaks the text anyway")
     ap.add_argument("--descr", default=None,
                     help="footprint descr (default: derived from the text)")
+    ap.add_argument("--recover", default=None, metavar="KICAD_MOD",
+                    help="read the text back OFF an emitted part: walk its "
+                         "fp_text glyphs in reading order, print the "
+                         "recovered text on stdout, and -- when the part "
+                         "stores its Microtext property -- prove the "
+                         "geometry against it. Emits nothing; every other "
+                         "flag is ignored. Exit 0 intact, 1 diverged.")
     g = ap.add_argument_group(
         "sizing solve",
         "Given any two of {art size, cap height, text length}, return the "
@@ -3814,6 +4484,49 @@ def main(argv=None) -> int:
                         "caller can sweep sizes without restating the load")
     add_cli_args(ap, prefix="", text_flag="--text")
     a = ap.parse_args(argv)
+
+    if a.recover:
+        try:
+            rec = recover_from_part(a.recover)
+        except MicrotextRefused as e:
+            sys.stderr.write(f"\n!! REFUSED: {e}\n\n")
+            return 2
+        print(rec["text"])
+        it = rec["integrity"]
+        if it is None:
+            sys.stderr.write(
+                f"  {rec['glyphs']} glyph(s) in {rec['rows']} row(s) read "
+                f"back off {pathlib.Path(a.recover).name}. No Microtext "
+                f"property on the part -- the text above is geometry alone, "
+                f"unverified. Parts emitted before issue #20 carry none.\n")
+            rc = 0
+        elif it["ok"]:
+            sys.stderr.write(
+                f"  INTACT: {it['source_chars']} source characters walked "
+                f"back off the part in reading order against the stored "
+                f"Microtext property ({it['dropped_spaces']} span-end "
+                f"space(s) consumed, {it['inserted_found']} declared "
+                f"hyphen(s) found)"
+                + (f"; {it['truncated']} character(s) of source were never "
+                   f"placed (the part declares its truncation)"
+                   if it.get("truncated") else "") + ".\n")
+            rc = 0
+        else:
+            sys.stderr.write(
+                f"  DIVERGED: the geometry does not walk back to the stored "
+                f"source: {it['reason']}"
+                + (f" at source character {it['at']}\n"
+                   f"    source: {it.get('source')!r}\n"
+                   f"    board : {it.get('board')!r}"
+                   if it.get("at") is not None else "") +
+                "\n  Either the fp_text was edited since emit, or the "
+                "property was. The part no longer carries the text it "
+                "claims.\n")
+            rc = 1
+        if a.report_json:
+            pathlib.Path(a.report_json).write_text(
+                json.dumps(rec, indent=2), encoding="utf-8")
+        return rc
 
     if a.text_file:
         if a.text:
@@ -3841,6 +4554,7 @@ def main(argv=None) -> int:
     from emit_art import ArtFp
     try:
         spec = spec_from_args(a)
+        spec.source_path = a.text_file
         short = (repr(spec.text) if len(spec.text) <= 40
                  else f"{len(spec.text)} chars starting {spec.text[:32]!r}")
         fp = ArtFp(a.name, descr=a.descr or f"microtext {short} at "
