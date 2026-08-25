@@ -375,6 +375,14 @@ class Fp:
         so an ordinary label is safe by construction and needs no vigilance from
         the caller. Passing an explicit thickness is how a sweep goes below the
         floor deliberately; that path is checked, and wants allow_below_floor.
+
+        `(unlocked yes)` is KiCad's spelling of keep_upright FALSE -- the token
+        is inverted, and a fp_text WITHOUT it loads with "Keep upright" ON.
+        Keep-upright text refuses to follow a 180 or 270 degree footprint
+        rotation (positions rotate, glyph orientation does not), which
+        scrambles any text and shreds per-glyph microtext outright. Every
+        fp_text this writer emits therefore carries the token; the regression
+        test is tests/test_keep_upright.py.
         """
         floor, _ = floor_for(layer)
         if thickness is None:
@@ -386,7 +394,8 @@ class Fp:
                               self.text_box(s, x, y, height, t))
         self._cap_check(s, x, y, height, t, layer, allow_below_floor)
         self.items.append(
-            f'\t(fp_text user "{s}" (at {x:.4f} {y:.4f}) (layer "{layer}")\n'
+            f'\t(fp_text user "{s}" (at {x:.4f} {y:.4f}) (unlocked yes) '
+            f'(layer "{layer}")\n'
             f'\t\t(uuid "{self._uuid()}")\n'
             f'\t\t(effects (font (size {height:.4f} {height:.4f}) '
             f'(thickness {t:.4f})) (justify left)))'
