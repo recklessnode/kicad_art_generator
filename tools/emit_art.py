@@ -1296,6 +1296,13 @@ class ArtFp(Fp):
         the fix from coupon_ladders.Fp.text() and it is not being re-opened
         here. tools/microtext.py passes an explicit thickness it has already
         proved legal, which leaves this check live underneath it as a backstop.
+
+        `(unlocked yes)` is keep_upright FALSE (the token is inverted; absent
+        means ON). With keep_upright ON, a footprint rotated 180 or 270
+        degrees rotates the glyph POSITIONS but not the glyphs, which turns
+        one-fp_text-per-glyph microtext into overlapping soup. Measured with
+        pcbnew 10.0: keep_upright=True at rot=180 draws every glyph at 0.
+        Regression test: tests/test_keep_upright.py.
         """
         floor, _ = floor_for(layer)
         if thickness is None:
@@ -1309,7 +1316,8 @@ class ArtFp(Fp):
               else f"{x:.4f} {y:.4f} {angle:.4f}")
         tail = f'\n\t\t(uuid "{self._uuid()}")' if self.with_uuids else ""
         self.items.append(
-            f'\t(fp_text user "{esc}" (at {at}) (layer "{layer}"){tail}\n'
+            f'\t(fp_text user "{esc}" (at {at}) (unlocked yes) '
+            f'(layer "{layer}"){tail}\n'
             f'\t\t(effects (font (size {height:.4f} {height:.4f}) '
             f'(thickness {t:.4f})) (justify left)))'
         )
@@ -1427,6 +1435,633 @@ def _tone_polygons(mask, mm_per_px, ox, oy, tolerance_mm, min_area_mm2):
     # outline that swallowed them.
     info["hole_polys"] = [hp for hs in buckets for hp in hs]
     return _bridge_loops(outers, buckets, info), info
+
+
+# --- copper width normalisation ---------------------------------------------
+def _normalise_copper_voids(polys, floor_mm, exclude=()):
+    """Fill sub-floor bare voids and void pinches in ONE copper layer's field.
+
+    `polys` is the layer's emitted outlines (sequences of (x, y) in mm);
+    returns (fillers, stats) where each filler is a list of (x, y) to emit as
+    an additional poly on the same layer.
+
+    WHY THIS EXISTS, measured 2026-08-24 on satoshi_points_50mm. min_area is a
+    PER-TONE filter: each tone is traced from its own label mask, so a bare
+    feature that lies BETWEEN two copper tones -- a T3-labelled dither fringe
+    along a T2/T6 boundary, one or two pixels wide -- is not a hole of either
+    trace. It is a notch in each tone's outer contour that becomes an enclosed
+    void only in the UNION of the emitted copper, which nothing upstream of
+    this function ever looks at. On that part the fringe produced 146 copper
+    voids (the committed piece had 4), 17 of them narrower than the copper
+    floor at their WIDEST inscribed point (0.038-0.088 mm): the etch cannot
+    open them, copper bridges, and the dots print as the surrounding tone.
+    Label-space morphology cannot express the floor either -- at 50 mm one
+    source pixel is 0.1397 mm, so an opening at floor/2 = 0.044 mm has
+    sub-pixel radius and is the identity on the raster; the sub-floor widths
+    are made below pixel scale, by marching-squares diamonds on isolated
+    pixels and RDP-thinned necks on diagonal chains.
+
+    So the repair is geometric, in mm, on the union -- the same construction
+    as SatoshiStarter's art-coupon/tools/normalise_library.py, moved to where
+    that file's own docstring says it belongs ("the LIBRARY-PIPELINE GAP ...
+    until emit_art normalises them itself"): bare = frame - union(copper);
+    kept = bare opened at floor/2 (what the etch can resolve); every INTERIOR
+    lost component -- an enclosed void, a pinch/tail of a legal void, or a
+    hair channel threaded between copper components -- is filled with copper
+    grown one floor-width into its copper neighbours (growth clipped to the
+    copper union, so it can never narrow any bare, and wide enough that the
+    filler is itself above the floor). Lost components touching the one kept
+    region that reaches the outside world are silhouette detail the etch
+    merely rounds and are left alone. Silk is handled by its own width pass
+    (_normalise_ink_width); mask is untouched: a filled hair void reads as
+    copper-under-mask, indistinguishable at these widths.
+
+    "The filler is itself above the floor" is true of the filler POLY and
+    NOT of the resulting ink when the lost bare ran BETWEEN two kept voids:
+    there is no copper on either side to fuse with, and the fill IS a
+    sub-floor copper web (0.0207 mm measured on satoshi_points_50mm by the
+    board-level ink check). The dual pass below the corridor/shave rounds
+    exists for exactly that: it re-measures the union the way verify_art
+    does and pads the webs, guards intact.
+
+    `exclude`: geometry (cut regions, window apertures) whose bare-ness is
+    structural -- routed away or lit through -- and must never be filled with
+    copper; any candidate touching it is skipped and counted.
+    """
+    stats = {"voids": 0, "pinches": 0, "excluded": 0,
+             "fillers": 0, "filled_mm2": 0.0}
+    try:
+        from shapely.geometry import Polygon, box
+        from shapely.ops import unary_union
+    except ImportError:
+        stats["skipped"] = "shapely not importable"
+        return [], stats
+
+    def _parts(g):
+        if g.is_empty:
+            return []
+        return list(g.geoms) if g.geom_type.startswith("Multi") else [g]
+
+    r = floor_mm / 2.0
+    u = unary_union([Polygon([(float(x), float(y)) for x, y in p]).buffer(0)
+                     for p in polys if len(p) >= 3])
+    if u.is_empty:
+        return [], stats
+    minx, miny, maxx, maxy = u.bounds
+    frame = box(minx - 1, miny - 1, maxx + 1, maxy + 1)
+    bare = frame.difference(u)
+    kept = bare.buffer(-r, quad_segs=32).buffer(r, quad_segs=32)
+    # buffer(0): a dithered checkerboard's dots touch corner-to-corner, and
+    # GEOS difference() is entitled to hand the whole constellation back as
+    # ONE self-touching ring. Measured on satoshi_points_50mm: parts_of(lost)
+    # said 1 component; buffer(0) said 1117. Every per-component decision
+    # below is wrong at that point, so split at the touches first.
+    lost = bare.difference(kept).buffer(0)
+    excl = unary_union([Polygon([(float(x), float(y)) for x, y in p]).buffer(0)
+                        for p in exclude if len(p) >= 3] or [Polygon()])
+    # The one kept region connected to the outside world. Lost components
+    # touching IT are silhouette detail -- corner shavings on the artwork's
+    # outer contour that the etch merely rounds -- and are left alone, the
+    # same policy normalise_library.py applies. Everything else in `lost` is
+    # interior: enclosed voids, pinches and tails of legal voids, and the
+    # hair channels a dithered stipple threads BETWEEN copper components
+    # (those channels reach the outside only through corner point-contacts,
+    # so they are not silhouette detail and do bridge at fab). Classifying
+    # against interior rings -- the earlier draft -- missed exactly that
+    # third class: bare between two copper components is no component's
+    # interior ring.
+    outer_kept = unary_union([k for k in _parts(kept)
+                              if k.intersects(frame.exterior)] or [Polygon()])
+    fill = []
+    for c in _parts(lost):
+        if c.area <= 1e-9:
+            continue
+        if c.distance(outer_kept) < 1e-9:
+            continue                      # silhouette detail
+        if not excl.is_empty and c.intersects(excl):
+            stats["excluded"] += 1
+            continue
+        fill.append(c)
+        stats["voids" if c.distance(kept) >= 1e-9 else "pinches"] += 1
+    if not fill:
+        return [], stats
+    # The filler is the chosen bare EXACTLY, plus a collar one floor wide
+    # grown ONLY into existing copper so it fuses with what it repairs and is
+    # itself never narrower than the floor. Growing first and clipping the
+    # legal bare back out -- normalise_library.py's construction -- is
+    # correct for the isolated voids that file treats, but on a dithered
+    # stipple field the spill-over lands beyond thin legal features and the
+    # flush clip shreds it into confetti: measured on satoshi_points_50mm,
+    # 830 filler polys with 0.06 mm slivers and 0.0056 mm filler-to-filler
+    # gaps -- the repair re-created the defect class it repairs. Intersecting
+    # the growth with the copper union cannot touch ANY bare, legal or lost,
+    # so the filler needs no clip at all.
+    fillsel = unary_union(fill)
+    blob = fillsel.union(
+        fillsel.buffer(floor_mm, quad_segs=8).intersection(u)).buffer(0)
+    # Merge false pairs. Two filler components (or a filler and a small
+    # original poly) can end up separated by less than the floor with SOLID
+    # COPPER filling the space between them -- a third polygon's copper, so
+    # the board is continuous there, but a pairwise gap scan cannot know that
+    # and reports an unetchable gap. Bridge each such pair with a corridor
+    # one floor wide, clipped to the copper union so it can never cover bare.
+    # A pair whose corridor is interrupted by real bare stays separate,
+    # correctly: that bare is legal (kept) and wider than the floor.
+    from shapely.geometry import LineString
+    from shapely.ops import nearest_points
+    originals = [Polygon([(float(x), float(y)) for x, y in p]).buffer(0)
+                 for p in polys if len(p) >= 3]
+    for _round in range(4):
+        ps = [p for p in _parts(blob) if p.area > 1e-9]
+        corridors = []
+        shaves = []
+        cand = ps + originals
+        for i, a in enumerate(ps):
+            for b in cand[i + 1:]:
+                ab, bb = a.bounds, b.bounds
+                if (ab[0] > bb[2] + floor_mm or bb[0] > ab[2] + floor_mm or
+                        ab[1] > bb[3] + floor_mm or bb[1] > ab[3] + floor_mm):
+                    continue
+                d = a.distance(b)
+                if not (1e-9 < d < floor_mm):
+                    continue
+                p1, p2 = nearest_points(a, b)
+                zone = LineString([p1, p2]).buffer(floor_mm, quad_segs=16)
+                cor = zone.intersection(u)
+                # Only a corridor that actually CONNECTS the pair goes in; a
+                # partial patch (real bare interrupts the copper between
+                # them) would add an orphan crumb, a brand-new sub-floor
+                # feature of our own making.
+                if not cor.is_empty and \
+                        len(_parts(unary_union([a, cor, b]).buffer(0))) == 1:
+                    corridors.append(cor)
+                    continue
+                # The pair is separated by REAL bare narrower than the floor.
+                # Filling two fringe pockets flush on opposite sides of a
+                # legal void's waist can do this (measured on the 28 mm S
+                # stroke: fillers 0.046 mm apart across kept), and where the
+                # ORIGINAL void itself necks below the floor, two fillers
+                # hugging its opposite edges re-measure that neck as a
+                # pairwise spacing violation the one-poly original never
+                # showed. Shave the filler out of the approach entirely --
+                # collar included: under the collar there is original copper,
+                # so nothing bare is exposed there, and the neck goes back to
+                # being one polygon's own two edges, not a pair.
+                shaves.append(zone.intersection(
+                    b.buffer(floor_mm, quad_segs=16)))
+        if corridors:
+            blob = blob.union(unary_union(corridors))
+        if shaves:
+            blob = blob.difference(unary_union(shaves))
+        if not corridors and not shaves:
+            break
+        blob = blob.buffer(0)
+    # DUAL PASS -- sub-floor copper WIDTH. Filling a lost hair channel that
+    # ran BETWEEN two kept voids leaves the fill itself as a sub-floor
+    # copper web (there is no copper on either side for the collar to fuse
+    # with -- measured 0.0207 mm on satoshi_points_50mm, found by the
+    # board-level ink check). Opening cannot see it (a waist shorter than
+    # the floor is re-covered by the dilation), so measure it the way
+    # verify_art does -- boundary pairs across the ink -- and pad what can
+    # be padded without starving a legal void or closing a legal gap. See
+    # _repair_subfloor_width for the guards; anything withheld is reported,
+    # not hidden.
+    total = u.union(blob).buffer(0)
+    bare_now = frame.difference(total)
+    kept_now = bare_now.buffer(-r, quad_segs=32).buffer(r, quad_segs=32)
+    kept_voids = [k for k in _parts(kept_now)
+                  if not k.intersects(frame.exterior)]
+    w_adds, w_stats = _repair_subfloor_width(
+        total, floor_mm, excl=(excl if not excl.is_empty else None),
+        kept_voids=kept_voids)
+    stats.update(w_stats)
+    if not w_adds.is_empty:
+        # Same collar as the void fillers: the pad alone is the crescent of
+        # NEW ink and can be caliper-thin as a poly; grown one floor into
+        # the existing copper it is a legal feature in its own right.
+        blob = blob.union(w_adds.union(
+            w_adds.buffer(floor_mm, quad_segs=8)
+            .intersection(total))).buffer(0)
+    fillers = []
+    for p in _parts(blob):
+        if p.area <= 1e-9:
+            continue
+        # A part left lying entirely on original copper (a collar remnant
+        # after the shave pass) fills nothing -- emitting it would only add a
+        # feature for the width and spacing checks to trip over.
+        if p.difference(u).area <= 1e-9:
+            continue
+        # 0.002 mm deviation: 1/50 of the floor, invisible to every check
+        # here, and the collar arcs it straightens are the bulk of the
+        # filler's vertex load (measured: 0.0005 left satoshi_points_50mm at
+        # 530 kB against the 250 kB budget).
+        q = p.simplify(0.002)
+        if q.is_empty or q.geom_type != "Polygon":
+            q = p
+        ext = np.asarray(list(q.exterior.coords)[:-1], dtype=np.float64)
+        rings = [np.asarray(list(r.coords)[:-1], dtype=np.float64)
+                 for r in q.interiors]
+        if rings:
+            # An annular filler: the lost ring ran all the way round a legal
+            # (kept) void, so the flush clip cut that void back out as an
+            # interior ring. The void is real bare that must survive, so the
+            # ring is kept and keyhole-bridged exactly the way every traced
+            # tone poly with holes is.
+            merged, ub = bridge_holes(ext, rings)
+            if ub:
+                raise RegionOpError(
+                    "copper normalisation: could not bridge a filler's "
+                    "interior ring; refusing to cover legal bare")
+            ext = merged
+        ext = _round_dedupe(ext)
+        if len(ext) >= 3:
+            fillers.append([(float(x), float(y)) for x, y in ext])
+    stats["fillers"] = len(fillers)
+    stats["filled_mm2"] = round(sum(Polygon(f).buffer(0).area
+                                    for f in fillers), 6)
+    return fillers, stats
+
+
+# --- sub-floor INK WIDTH (the dual of the void fill) ------------------------
+#
+# _normalise_copper_voids fills bare the etch cannot open. The board-level
+# ink-floor check (verify_art, which runs the region measurement only on
+# .kicad_pcb) then found the DUAL class on coupon_alpha, 2026-08-24: ink
+# whose inscribed width is below the floor. Three witnesses, all in
+# satoshi_points_50mm, all SHORT waists:
+#
+#   * F.Cu 0.0207 mm at local (-18.690, 5.595) -- a filled hair channel
+#     BETWEEN two kept voids. The void fill's own construction made it: the
+#     collar grows the filler into copper only, so where the lost bare ran
+#     between two legal voids there is no copper on either side to fuse
+#     with, and the fill IS the 0.02 mm copper web. "The filler is itself
+#     never narrower than the floor" is false exactly there: true of the
+#     filler POLY, not of the resulting ink between two surviving voids.
+#   * F.SilkS 0.0990 and 0.1401 mm -- waists drawn in the traced silk art
+#     itself (present since the T2/T3 tone split; silk was never width-
+#     checked because the per-poly min-feature caliper is a convex hull and
+#     these polys are concave).
+#
+# Morphological opening CANNOT find these: a waist shorter than the floor is
+# re-covered by the dilation half of the opening (discs seated in the fat
+# funnels on either side poke across it), which is why the void-fill pass
+# saw nothing. The only measurement that sees a short waist is the one
+# verify_art uses: boundary points closer than the floor ACROSS the ink,
+# excluding contour-adjacent pairs (the same piece of boundary bending).
+# So that is the measurement used here, and the repair is a pad: the witness
+# chord buffered to floor/2 + hygiene, cusp-melted into the union so the
+# seams do not leave knife-edge bare wedges of our own making.
+
+_WIDTH_EPS_FRAC = 0.005     # float-dust guard: a feature drawn AT the floor
+                            # (microtext strokes are exactly 0.1 mm) must not
+                            # be flagged for the last ulp of a subtraction.
+                            # 0.5% of the floor is 4.4 um on copper -- an
+                            # order below anything the fab resolves, and two
+                            # orders below the emitter floor's own headroom
+                            # over the profile floor (0.1 vs 0.0889).
+_WIDTH_SEG_CAP = 400_000    # scan refusal threshold, reported honestly
+
+
+def _boundary_width_sites(u, floor_mm, eps_mm=None):
+    """Witness chords across the ink narrower than floor_mm.
+
+    `eps_mm`: how far below the floor a width must be before it counts.
+    None means floor_mm * _WIDTH_EPS_FRAC -- right for layers whose emitter
+    floor carries headroom over the fab floor (F.Cu: 0.1 vs 0.0889), where
+    features are DRAWN at the emitter floor (microtext strokes) and float
+    dust must not flag them. Pass 0.0 for a layer whose floor IS the fab
+    floor (silk: 0.15 on both sides): there is no headroom to hide in, and
+    verify_art fails a 0.1493 mm waist just as hard as a 0.06 mm one.
+
+    Returns (sites, capped): sites is a list of (d, (x1, y1), (x2, y2)) --
+    boundary point pairs at distance d with the chord midpoint INSIDE the
+    ink -- and capped is True when the scan refused to run (too many
+    segments), in which case sites is empty and the caller must say so.
+    Contour-adjacent pairs (arc distance along the same ring under 2x the
+    floor plus the two segment half-lengths) are the same piece of boundary
+    bending, not a width, and are excluded -- the same rule verify_art's
+    region scan applies.
+    """
+    import math as _math
+    from shapely.geometry import LineString, Point
+    from shapely.ops import nearest_points
+
+    def _parts(g):
+        if g.is_empty:
+            return []
+        return list(g.geoms) if g.geom_type.startswith("Multi") else [g]
+
+    if eps_mm is None:
+        eps_mm = floor_mm * _WIDTH_EPS_FRAC
+    thresh = floor_mm - eps_mm
+    rings = []
+    for comp in _parts(u):
+        rings.append(comp.exterior)
+        rings.extend(comp.interiors)
+    segs = []
+    ring_len = {}
+    for rid, ring in enumerate(rings):
+        cs = list(ring.coords)
+        acc = 0.0
+        for a, b in zip(cs[:-1], cs[1:]):
+            ln = _math.hypot(b[0] - a[0], b[1] - a[1])
+            if ln > 0:
+                # Densify: two LONG parallel edges a hair apart yield ONE
+                # nearest-point chord (at an arbitrary end), so a sub-floor
+                # strip longer than the floor would get one pad at its tip
+                # and keep the rest of its length. Split long edges so every
+                # stretch of a thin strip produces its own witness chord.
+                npc = max(1, int(_math.ceil(ln / floor_mm)))
+                for k in range(npc):
+                    t0, t1 = k / npc, (k + 1) / npc
+                    pa = (a[0] + (b[0] - a[0]) * t0,
+                          a[1] + (b[1] - a[1]) * t0)
+                    pb = (a[0] + (b[0] - a[0]) * t1,
+                          a[1] + (b[1] - a[1]) * t1)
+                    pl = ln / npc
+                    segs.append((rid, acc + k * pl, pl,
+                                 LineString([pa, pb])))
+            acc += ln
+        ring_len[rid] = acc
+    if len(segs) > _WIDTH_SEG_CAP:
+        return [], True
+    cell = max(floor_mm, 0.05)
+    grid = {}
+    for i, (_rid, _mid, _ln, ls) in enumerate(segs):
+        x0, y0, x1, y1 = ls.bounds
+        for gx in range(int(x0 // cell), int(x1 // cell) + 1):
+            for gy in range(int(y0 // cell), int(y1 // cell) + 1):
+                grid.setdefault((gx, gy), []).append(i)
+    sites = []
+    for i, (rid, a0, ln, ls) in enumerate(segs):
+        x0, y0, x1, y1 = ls.bounds
+        cand = set()
+        for gx in range(int((x0 - floor_mm) // cell),
+                        int((x1 + floor_mm) // cell) + 1):
+            for gy in range(int((y0 - floor_mm) // cell),
+                            int((y1 + floor_mm) // cell) + 1):
+                cand.update(grid.get((gx, gy), ()))
+        for j in cand:
+            if j <= i:
+                continue
+            rid2, a02, ln2, ls2 = segs[j]
+            if rid == rid2:
+                # cheap reject on segment spans before the exact test below
+                da = abs((a0 + ln / 2) - (a02 + ln2 / 2))
+                da = min(da, ring_len[rid] - da)
+                if da + (ln + ln2) / 2.0 < 2.0 * floor_mm:
+                    continue
+            bx = ls2.bounds
+            if (bx[0] > x1 + floor_mm or x0 > bx[2] + floor_mm or
+                    bx[1] > y1 + floor_mm or y0 > bx[3] + floor_mm):
+                continue
+            d = ls.distance(ls2)
+            if not (1e-6 < d < thresh):
+                continue
+            p1, p2 = nearest_points(ls, ls2)
+            if rid == rid2:
+                # EXACT arc positions of the witness points -- an estimate
+                # from segment midpoints over-excludes by half a segment
+                # length each side, and a repair-made flange sits exactly in
+                # that blind margin (measured: verify_art flagged a 0.0608
+                # mm flange this scan had excluded as contour-adjacent)
+                w1 = a0 + ls.project(p1)
+                w2 = a02 + ls2.project(p2)
+                da = abs(w1 - w2)
+                da = min(da, ring_len[rid] - da)
+                if da < 2.0 * floor_mm:
+                    continue
+            if u.covers(Point((p1.x + p2.x) / 2, (p1.y + p2.y) / 2)):
+                sites.append((d, (p1.x, p1.y), (p2.x, p2.y)))
+    return sites, False
+
+
+def _repair_subfloor_width(u, floor_mm, *, excl=None, kept_voids=None,
+                           eps_mm=None):
+    """Pad every sub-floor width site of ink union `u` that can be padded
+    without collateral damage.
+
+    Returns (adds, stats): `adds` is a shapely geometry (possibly empty) of
+    NEW ink to union in, `stats` has counts and human-readable notes for the
+    emit report. Guards, each of which withholds the pad and records a note
+    instead of quietly doing harm:
+
+      * `excl` (structural bare -- cut/window): a pad may not touch it.
+      * `kept_voids` (copper only): every legal bare void the pad intrudes
+        on must keep a core an r-disc still fits in -- a pad must never turn
+        a fabricable void into an unfabricable one.
+      * spacing: the pad must not stand closer than the floor to ink it did
+        not fuse with, or the repair would manufacture the spacing violation
+        the clearance check exists to catch.
+
+    Each applied pad is cusp-melted: unioning a disc into an outline leaves
+    knife-edge bare wedges where the arc meets the boundary at a glancing
+    angle (measured: 0.0003 mm wedges, thousands of false witnesses); a
+    local closing at floor/2 restricted to the pad's neighbourhood melts
+    the seam.
+    """
+    from shapely.geometry import LineString, Point, Polygon
+    from shapely.ops import unary_union
+
+    def _parts(g):
+        if g.is_empty:
+            return []
+        return list(g.geoms) if g.geom_type.startswith("Multi") else [g]
+
+    from shapely.ops import nearest_points as _np_pts
+    r = floor_mm / 2.0
+    stats = {"width_sites": 0, "width_padded": 0, "width_left": [],
+             "width_scan_capped": False}
+    total = u
+    adds = []
+    left_pts = []      # centres of withheld zones -- not retried, not re-noted
+
+    def _zones_of(sites):
+        # Merge zones that stand within a floor of each other BEFORE
+        # padding: two separate pads 0.099 mm apart are a brand-new
+        # sub-floor gap of our own making (measured on satoshi_points_28mm
+        # silk, first attempt). Joined with a floor-wide corridor between
+        # nearest points -- a closing would join them too, but its erosion
+        # half leaves a sub-floor waist in the merged zone, which is this
+        # function's own defect class.
+        zs = _parts(unary_union(
+            [LineString([p1, p2]).buffer(r + 0.011, quad_segs=16)
+             for _d, p1, p2 in sites]).buffer(0))
+        for _m in range(6):
+            joined = []
+            for i, a in enumerate(zs):
+                for b in zs[i + 1:]:
+                    d = a.distance(b)
+                    if 1e-9 < d < floor_mm:
+                        q1, q2 = _np_pts(a, b)
+                        joined.append(LineString([q1, q2])
+                                      .buffer(r + 0.011, quad_segs=16))
+            if not joined:
+                break
+            zs = _parts(unary_union(zs + joined).buffer(0))
+        return zs
+
+    # A pad is new boundary, and new boundary can taper into a brand-new
+    # thin flange where its arc leaves the original outline over a notch
+    # (measured: a 0.0608 mm flange left by the first single-pass version).
+    # So the scan-and-pad loop runs to convergence; anything still thin
+    # after the last round is reported, never silently kept.
+    for _round in range(4):
+        sites, capped = _boundary_width_sites(total, floor_mm, eps_mm)
+        if capped:
+            stats["width_scan_capped"] = True
+            break
+        sites = [s for s in sites
+                 if all(Point(s[1]).distance(lp) >= 0.10 for lp in left_pts)]
+        if not sites:
+            break
+        zones = _zones_of(sites)
+        if _round == 0:
+            stats["width_sites"] = len(zones)
+        progressed = False
+        for z in zones:
+            c = z.representative_point()
+            wmin = min((d for d, p1, _p2 in sites
+                        if z.distance(Point(p1)) < 0.05), default=None)
+            where = "(%.3f, %.3f)" % (c.x, c.y)
+            wtxt = "%.4f" % wmin if wmin else "?"
+            if excl is not None and (not excl.is_empty) \
+                    and z.intersects(excl):
+                stats["width_left"].append(
+                    "%s w=%s: pad withheld, touches structural cut/window "
+                    "bare" % (where, wtxt))
+                left_pts.append(c)
+                continue
+            cand = total.union(z).buffer(0)
+            hood = z.buffer(floor_mm)
+            closed = cand.buffer(r, quad_segs=16).buffer(-r, quad_segs=16)
+            cand = cand.union(
+                closed.difference(cand).intersection(hood)).buffer(0)
+            add = cand.difference(total).buffer(0)
+            if add.is_empty:
+                left_pts.append(c)
+                continue
+            # void guard: no pad may starve a legal bare void of the floor
+            if kept_voids:
+                starved = [k for k in kept_voids
+                           if k.intersects(add) and
+                           k.difference(cand).buffer(-r).is_empty]
+                if starved:
+                    stats["width_left"].append(
+                        "%s w=%s: pad withheld, it would starve %d legal "
+                        "bare void(s) below the floor" %
+                        (where, wtxt, len(starved)))
+                    left_pts.append(c)
+                    continue
+            # spacing guard: the pad must not approach ink it did not fuse
+            # with
+            own = unary_union([p for p in _parts(cand)
+                               if p.intersects(add)])
+            rest = cand.difference(own.buffer(1e-9))
+            if (not rest.is_empty) and add.distance(rest) < floor_mm:
+                stats["width_left"].append(
+                    "%s w=%s: pad withheld, it would stand %.4f mm from "
+                    "other ink (floor %.4f)" %
+                    (where, wtxt, add.distance(rest), floor_mm))
+                left_pts.append(c)
+                continue
+            adds.append(add)
+            total = cand
+            stats["width_padded"] += 1
+            progressed = True
+        if not progressed:
+            break
+    else:
+        # ran out of rounds -- re-scan once more and say what is left
+        sites, capped = _boundary_width_sites(total, floor_mm, eps_mm)
+        sites = [s for s in sites
+                 if all(Point(s[1]).distance(lp) >= 0.10 for lp in left_pts)]
+        if sites:
+            worst = min(sites)
+            stats["width_left"].append(
+                "(%.3f, %.3f) w=%.4f: UNCONVERGED after 4 pad rounds -- "
+                "%d witness pair(s) still under the floor" %
+                (worst[1][0], worst[1][1], worst[0], len(sites)))
+    return (unary_union(adds).buffer(0) if adds else Polygon()), stats
+
+
+def _normalise_ink_width(polys, floor_mm):
+    """Silk-layer entry: pad sub-floor ink waists in one layer's drawn art.
+
+    Same measurement and repair as the copper dual pass, minus the void
+    guard (silk has no etched bare to protect). Returns (pads, stats) where
+    each pad is a list of (x, y) to emit as an extra poly on the layer.
+    """
+    stats = {}
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except ImportError:
+        stats["skipped"] = "shapely not importable"
+        return [], stats
+    u0 = unary_union([Polygon([(float(x), float(y)) for x, y in p]).buffer(0)
+                      for p in polys if len(p) >= 3])
+    if u0.is_empty:
+        return [], stats
+
+    def _as_emitted(geom):
+        """Simplify + round exactly as the pads will be written, so the
+        loop below measures what verify_art will read. Silk has NO headroom
+        over the fab floor (0.15 on both sides), and the first version
+        measured pre-emission geometry: its own 0.002 mm simplify shaved a
+        repaired waist to 0.1446 mm and emission rounding dipped a legal
+        0.15 to 0.1493 -- both real FAILs on the board that the emit-time
+        scan never saw."""
+        out = []
+        for p in (list(geom.geoms) if geom.geom_type.startswith("Multi")
+                  else ([geom] if not geom.is_empty else [])):
+            if p.area <= 1e-9 or p.geom_type != "Polygon":
+                continue
+            q = p.simplify(0.0005)
+            if q.is_empty or q.geom_type != "Polygon":
+                q = p
+            ext = np.asarray(list(q.exterior.coords)[:-1], dtype=np.float64)
+            rings = [np.asarray(list(rg.coords)[:-1], dtype=np.float64)
+                     for rg in q.interiors]
+            if rings:
+                merged, ub = bridge_holes(ext, rings)
+                if ub:
+                    continue
+                ext = merged
+            ext = _round_dedupe(ext)
+            if len(ext) >= 3:
+                out.append([(float(x), float(y)) for x, y in ext])
+        return out
+
+    pads = []
+    u = u0
+    stats = {"width_sites": 0, "width_padded": 0, "width_left": [],
+             "width_scan_capped": False}
+    for _round in range(3):
+        adds, st = _repair_subfloor_width(u, floor_mm, eps_mm=0.0)
+        stats["width_sites"] = max(stats["width_sites"], st["width_sites"])
+        stats["width_padded"] += st["width_padded"]
+        stats["width_left"].extend(st["width_left"])
+        stats["width_scan_capped"] |= st["width_scan_capped"]
+        if adds.is_empty:
+            break
+        # Collar: the crescent of new ink alone can be caliper-thin as a
+        # poly; grown one floor into the silk it pads, the emitted poly is
+        # a legal feature in its own right (same construction as the copper
+        # void fillers).
+        adds = adds.union(adds.buffer(floor_mm, quad_segs=8)
+                          .intersection(u)).buffer(0)
+        new_pads = _as_emitted(adds)
+        if not new_pads:
+            break
+        pads.extend(new_pads)
+        # measure the AS-EMITTED union next round, not the ideal one
+        u = unary_union([u0] + [Polygon(p).buffer(0)
+                                for p in pads]).buffer(0)
+    stats["pads"] = len(pads)
+    stats["padded_mm2"] = round(sum(Polygon(p).buffer(0).area
+                                    for p in pads), 6)
+    return pads, stats
 
 
 # --- T8 / T9 region construction -------------------------------------------
@@ -1908,6 +2543,7 @@ def emit_detailed(labels, tone_names, width_mm, name, *,
                   silhouette_tone=None, silhouette_mm=None,
                   knockouts=(), knockout_floor_mult=KNOCKOUT_FLOOR_MULT,
                   gap_audit=True, gap_audit_max=GAP_AUDIT_MAX,
+                  copper_normalise=True, silk_normalise=True,
                   fill_mode="solid", luma=None,
                   hatch_pitch_mm=DEFAULT_HATCH_PITCH_MM,
                   hatch_angle_deg=DEFAULT_HATCH_ANGLE_DEG,
@@ -2155,6 +2791,8 @@ def emit_detailed(labels, tone_names, width_mm, name, *,
                 f"geometry was emitted for it. Nothing was lost -- but check "
                 f"you named the tone you meant.")
     copper_polys: list[tuple] = []      # (tone, layer, pts), for the cut audit
+    silk_polys: list[tuple] = []        # (tone, layer, pts), for the silk
+                                        # width pass (_normalise_ink_width)
     cut_regions: list = []
     window_regions: list = []
     report["t8"] = None
@@ -2341,6 +2979,8 @@ def emit_detailed(labels, tone_names, width_mm, name, *,
             for layer in layers:
                 if COPPER_LAYER_RE.match(layer):
                     copper_polys.extend((tone, layer, p) for p in qpts)
+                elif layer in ("F.SilkS", "B.SilkS"):
+                    silk_polys.extend((tone, layer, p) for p in qpts)
                 for p in qpts:
                     fp.poly(p, layer)
 
@@ -2351,6 +2991,8 @@ def emit_detailed(labels, tone_names, width_mm, name, *,
                 # a buried In1 mark on a routed-away slug is lost just as surely
                 # as a front one.
                 copper_polys.extend((tone, layer, p) for p in polys)
+            elif layer in ("F.SilkS", "B.SilkS"):
+                silk_polys.extend((tone, layer, p) for p in polys)
             for p in polys:
                 fp.poly(p, layer)
 
@@ -2364,6 +3006,116 @@ def emit_detailed(labels, tone_names, width_mm, name, *,
         [l for r in report["tones"] if r["polys"] for l in r["layers"]])
     if _bw:
         report["warnings"].append(_bw)
+
+    # --- copper width normalisation. min_area is per-tone; a bare sliver
+    # BETWEEN two copper tones (a dither fringe the quantiser put on a
+    # non-copper tone along a copper/copper boundary) is a hole only of the
+    # copper UNION, which no per-tone filter ever sees, and below the copper
+    # floor it does not etch -- the dots bridge and print as the surrounding
+    # tone. Make the file say so: fill enclosed sub-floor voids and void
+    # pinches, flush to the legal opening. See _normalise_copper_voids for
+    # the measurement that forced this and for what is deliberately NOT
+    # touched. Surface copper only: the buried floor is still the disputed
+    # 0.30-vs-0.50 PROVISIONAL pair (see MIN_FEATURE_BURIED_MM) and opening
+    # at a number that may halve is not a repair.
+    report["copper_normalise"] = None
+    if copper_normalise:
+        # Structural bare: routed away (T9) or lit through (T8). Outer loops
+        # only -- an island inside a cut region is board that stays, and bare
+        # on it is judged like any other bare.
+        structural = [o for o, _isl in cut_regions] + \
+                     [o for o, _isl in window_regions]
+        cn = {"floor_mm": {}, "layers": {}}
+        for lay in ("F.Cu", "B.Cu"):
+            lay_polys = [p for _t, l, p in copper_polys if l == lay]
+            if not lay_polys:
+                continue
+            floor_cn = MIN_FEATURE_MM[lay]
+            fillers, cst = _normalise_copper_voids(lay_polys, floor_cn,
+                                                   exclude=structural)
+            cn["floor_mm"][lay] = floor_cn
+            cn["layers"][lay] = cst
+            if cst.get("skipped"):
+                report["warnings"].append(
+                    f"copper normalisation SKIPPED on {lay}: "
+                    f"{cst['skipped']} -- sub-floor voids between copper "
+                    f"tones, if any, were NOT filled and verify_art will "
+                    f"fail them")
+                continue
+            for f in fillers:
+                fp.poly(f, lay)
+                copper_polys.append(("copper filler", lay,
+                                     np.asarray(f, dtype=np.float64)))
+            if fillers:
+                report["warnings"].append(
+                    f"{lay}: filled {cst['voids']} enclosed sub-floor "
+                    f"void(s) + {cst['pinches']} void pinch(es) with "
+                    f"{cst['fillers']} copper filler poly(s), "
+                    f"{cst['filled_mm2']:g} mm2 -- bare features narrower "
+                    f"than the {floor_cn:g} mm floor do not etch, so the "
+                    f"file now says what the panel will do")
+            if cst["excluded"]:
+                report["warnings"].append(
+                    f"{lay}: {cst['excluded']} sub-floor bare void(s) touch "
+                    f"cut/window geometry and were left unfilled -- "
+                    f"structural bare is not a defect")
+            if cst.get("width_padded"):
+                report["warnings"].append(
+                    f"{lay}: padded {cst['width_padded']} sub-floor ink "
+                    f"WIDTH site(s) (webs/waists narrower than the "
+                    f"{floor_cn:g} mm floor, found by the boundary-pair "
+                    f"scan; opening cannot see a short waist)")
+            for note in cst.get("width_left", ()):
+                report["warnings"].append(
+                    f"{lay}: sub-floor ink width NOT repaired at {note} -- "
+                    f"verify_art will judge it against the fab floor")
+            if cst.get("width_scan_capped"):
+                report["warnings"].append(
+                    f"{lay}: ink width scan REFUSED (over "
+                    f"{_WIDTH_SEG_CAP:,} boundary segments) -- sub-floor "
+                    f"webs, if any, were NOT padded")
+        report["copper_normalise"] = cn
+
+    # --- silk width normalisation. The same dual measurement on the drawn
+    # silk: the per-poly min-feature caliper is a convex hull and cannot see
+    # a waist inside a concave silk poly (measured: caliper 0.7978 mm,
+    # true inscribed width 0.0990 mm on satoshi_points_50mm F.SilkS), and
+    # below the silk floor the line does not print reliably. Pad the waists
+    # to the floor; the pad is a floor-wide disc on the waist -- invisible
+    # at viewing scale, decisive at fab scale.
+    report["silk_normalise"] = None
+    if silk_normalise:
+        sn = {"floor_mm": {}, "layers": {}}
+        for lay in ("F.SilkS", "B.SilkS"):
+            lay_polys = [p for _t, l, p in silk_polys if l == lay]
+            if not lay_polys:
+                continue
+            floor_sn = MIN_FEATURE_MM[lay]
+            pads, sst = _normalise_ink_width(lay_polys, floor_sn)
+            sn["floor_mm"][lay] = floor_sn
+            sn["layers"][lay] = sst
+            if sst.get("skipped"):
+                report["warnings"].append(
+                    f"silk normalisation SKIPPED on {lay}: "
+                    f"{sst['skipped']} -- sub-floor silk waists, if any, "
+                    f"were NOT padded and verify_art will fail them")
+                continue
+            for p in pads:
+                fp.poly(p, lay)
+            if pads:
+                report["warnings"].append(
+                    f"{lay}: padded {sst['pads']} sub-floor silk width "
+                    f"site(s) ({sst['padded_mm2']:g} mm2) -- ink narrower "
+                    f"than the {floor_sn:g} mm silk floor does not print "
+                    f"reliably")
+            for note in sst.get("width_left", ()):
+                report["warnings"].append(
+                    f"{lay}: sub-floor silk width NOT repaired at {note}")
+            if sst.get("width_scan_capped"):
+                report["warnings"].append(
+                    f"{lay}: silk width scan REFUSED (over "
+                    f"{_WIDTH_SEG_CAP:,} boundary segments)")
+        report["silk_normalise"] = sn
 
     # --- gap audit. Every hole in every drawn tone is a knockout whether or not
     # anyone asked for one, and a knockout is not floored like a mark: ink
@@ -3449,6 +4201,45 @@ def _check_tone_map(tmap, pal, stats, allow_inner, allow_provisional):
                     f"may well be right -- but it loses a distinction the "
                     f"artwork has, and it has to be named: add "
                     f"merge_ok = [\"{b.hex}\"] to {a.hex}")
+
+    # A declared merge may still not ERASE a feature (issue #17). merge_ok
+    # says "these two share a tone"; where the merged ink forms a connected
+    # region wholly enclosed by the ink it merges into, the region has no
+    # remaining visible edge -- satoshi_points' chest S was drawn, gold on
+    # gold, and did not exist at any size while every drawn-ness check
+    # passed. That second, bigger loss needs its own sentence: erase_ok.
+    for row in (stats.get("merge_erasure") or []):
+        if row["erase_ok"] or row["erased_pct"] < _tm.MERGE_ERASED_FAIL_PCT:
+            continue
+        comps = [c for c in row["components"] if c["erased"]]
+        if not comps:
+            # every erased region ranked below the census's 12-component cap:
+            # still a refusal, described by the totals alone.
+            comps = [{"px": row["erased_px"], "enclosure": 1.0}]
+        # Any legible front tone OTHER than the group's own renders
+        # differently and keeps the feature. One already bound by another ink
+        # is still a way out -- it costs its own merge_ok sentence (and that
+        # merge gets this same census): satoshi_points' repair put the
+        # shading on T3 beside the tongue, exactly so.
+        alts = []
+        for t in pal.drawable(allow_inner=allow_inner):
+            if t == row["tone"] or abs(pal.dl_to_board(t)) < _pal.LEGIBLE_MIN_DL:
+                continue
+            holders = sorted(i.hex for i in tmap.inks if i.tone == t)
+            alts.append(t if not holders else
+                        f"{t} (bound to {', '.join(holders)}; needs merge_ok)")
+        alt_txt = ("; ".join(alts) if alts
+                   else "none exists -- reconsider the neighbouring bindings")
+        out.append(
+            f"{row['hex']} merges into {', '.join(row['merged_into'])} "
+            f"({row['tone']}) and {row['erased_pct']:.3f}% of the ink "
+            f"({row['erased_px']:,} px in {row['n_erased']} region(s), largest "
+            f"{comps[0]['px']:,} px at {100 * comps[0]['enclosure']:.1f}% "
+            f"enclosed) forms features drawn ONLY in this colour and wholly "
+            f"surrounded by the colour it now equals. They will be drawn and "
+            f"not exist at any size. Bind {row['hex']} to a tone that stays "
+            f"distinct ({alt_txt}), or set erase_ok = true on it if losing "
+            f"the feature is the intent")
     return out
 
 
@@ -3990,6 +4781,21 @@ def main(argv=None):
                          f"segmenting, not after: docs/pcb-palette.md measures "
                          f"25 levels at 238 kB against 8 at 76 kB for the same "
                          f"square")
+    gr.add_argument("--no-copper-normalise", dest="copper_normalise",
+                    action="store_false", default=True,
+                    help="do not fill sub-floor bare voids enclosed in the "
+                         "copper union (dither fringe between two copper "
+                         "tones; min-area cannot see them because they are "
+                         "holes of no single tone's trace). Default fills "
+                         "them flush to the legal opening, because below the "
+                         "copper floor they do not etch anyway")
+    gr.add_argument("--no-silk-normalise", dest="silk_normalise",
+                    action="store_false", default=True,
+                    help="do not pad sub-floor width waists in the drawn "
+                         "silk (a waist inside a concave silk poly is "
+                         "invisible to the convex-hull caliper and does not "
+                         "print reliably below the silk floor). Default "
+                         "pads them to the floor")
     gr.add_argument("--no-gap-audit", dest="gap_audit", action="store_false",
                     default=True,
                     help="skip measuring every hole against the knockout floor")
@@ -4172,6 +4978,8 @@ def main(argv=None):
             knockouts=knockouts,
             knockout_floor_mult=args.knockout_floor_mult,
             gap_audit=args.gap_audit, gap_audit_max=args.gap_audit_max,
+            copper_normalise=args.copper_normalise,
+            silk_normalise=args.silk_normalise,
             window_tone=args.window_tone, cut_tone=args.cut_tone,
             cut_fillet_mm=args.cut_fillet_mm,
             cut_outer_fillet_mm=args.cut_outer_fillet_mm,
