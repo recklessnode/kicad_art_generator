@@ -78,11 +78,39 @@ Checks, one reported line each:
                      corresponding DRC test off, and "DRC: 0 violations" on a
                      board like that tested nothing.
 
-Exit status: 0 = every file passed, 1 = at least one FAIL, 2 = harness error.
-WARNs do not fail the run unless --strict is given. A feature or gap under a
-floor that came from a NAMED FABRICATOR is a FAIL, not a WARN: the palette
-doc's numbers are house guidance, but a vendor's published limit is what that
-process images, and art under it is missing from the delivered board.
+A SKIPPED CHECK CANNOT CONTRIBUTE TO A PASS
+-------------------------------------------
+The sentence at the bottom of this docstring used to read "a check that cannot
+run is never reported as a pass". It was false, and it was false in the only
+place that decides anything -- the summary and the exit code. Run under an
+interpreter without shapely, the ink-floor check reported SKIP, and this
+harness printed
+
+    SUMMARY: 0 pass, 1 warn, 0 fail of 1
+    No hard failures. Warnings above are fabrication risks ...
+
+and exited 0, on a board it FAILs when shapely is present. Every check line was
+honest; the verdict folded SKIP into WARN and WARN into "not a failure".
+
+Coverage is now a SECOND AXIS, independent of level. Every place a check can
+not happen -- a missing optional import, a missing kicad-cli, --no-ink /
+--no-clearance / --no-render / --ink-layers, a layer whose items cannot be
+turned into geometry, a budget exhausted part-way, a floor that is a guess
+rather than a published number, a layer with too few features to form a pair --
+records a Gap saying what was not measured, why, and HOW MUCH of the board that
+was. A file with any Gap is INCOMPLETE, which is not a pass and cannot become
+one, and the run exits 3 unless the caller passes --accept-gaps. See the
+COVERAGE block below the level table.
+
+"Not applicable" is not a gap: check_inventory on a footprint has nothing to
+measure and records nothing.
+
+Exit status: 0 = every file passed and every check ran, 1 = at least one FAIL,
+2 = harness error, 3 = nothing failed but at least one check did not run (or
+did not finish). WARNs do not fail the run unless --strict is given. A feature
+or gap under a floor that came from a NAMED FABRICATOR is a FAIL, not a WARN:
+the palette doc's numbers are house guidance, but a vendor's published limit is
+what that process images, and art under it is missing from the delivered board.
 
 TEXT IS EXPANDED, NOT SUMMARISED
 --------------------------------
@@ -107,7 +135,10 @@ startup, not hardcoded here -- the doc is the authority. Where the doc gives no
 number (the buried-tone floor) the value used is marked PROVISIONAL in output.
 
 Nothing is ever quietly ignored: every check that cannot run says so, loudly,
-and a check that cannot run is never reported as a pass.
+it records what it did not measure and how much of the board that was, and the
+run it belongs to cannot report a pass while it is there. A missing hard
+dependency is announced at STARTUP, naming the interpreter that lacks it and
+the one in this repo's .venv that does not.
 """
 
 from __future__ import annotations
@@ -163,6 +194,90 @@ _RANK = {PASS: 0, INFO: 1, SKIP: 2, WARN: 3, FAIL: 4}
 
 def worst(*levels: str) -> str:
     return max(levels, key=lambda x: _RANK[x], default=PASS)
+
+
+# A FILE verdict only -- never a check level. See _verdict().
+INCOMPLETE = "INCOMPLETE"
+
+
+# --------------------------------------------------------------------------
+# COVERAGE: the second axis, and why one axis was not enough
+# --------------------------------------------------------------------------
+#
+# THE TWELFTH INSTANCE. This harness ran under an interpreter with no shapely,
+# the ink-floor check reported SKIP, and the run summarised
+#
+#     SUMMARY: 0 pass, 1 warn, 0 fail of 1
+#     No hard failures. Warnings above are fabrication risks ...
+#
+# and exited 0, on a board that the SAME harness on the SAME profile FAILs when
+# shapely is present. Every individual line was honest -- check_ink() literally
+# printed "this is not a pass" -- and the run still reported green, because the
+# only thing a caller reads is the exit code and the last line.
+#
+# The root cause is that SEVERITY and COVERAGE were crammed onto one axis.
+# `SKIP` sat between INFO and WARN in _RANK, so "nothing measured this" was
+# folded into the same number as "this is a bit risky", and at the summary the
+# fold became a lie: WARN means the harness looked and did not like what it
+# saw, SKIP means the harness did not look. Those must never collapse.
+#
+# So coverage is now its own axis. A check reports, independently of its level:
+#
+#   * level  -- what it FOUND. Unchanged; PASS/WARN/FAIL still mean what they
+#               meant, and a check that found nothing wrong still says PASS.
+#   * gaps   -- what it did NOT MEASURE, and how much of the board that was.
+#
+# A Gap NEVER improves and never worsens `level`; it is not a finding. What it
+# does is bind the run: a file with any gap cannot be reported as a pass, and a
+# run with any gap exits non-zero unless the caller passes --accept-gaps. That
+# is deliberately not something --strict already did: --strict is opt-in, and a
+# defect class that has now recurred twelve times does not get to depend on
+# somebody remembering a flag. Nor would --strict have been enough if somebody
+# had remembered it: several of the holes below sit on checks whose LEVEL is
+# PASS -- a layer holding one feature reports "all gaps above floor" over zero
+# pairs, a --no-render run reports "loads in KiCad" without the plot
+# cross-check -- and --strict only promotes WARN and SKIP.
+#
+# NOT APPLICABLE IS NOT A GAP. check_inventory on a footprint reports SKIP
+# "not a board": there is nothing there to measure and no board went
+# unmeasured. Sites like that carry NO Gap, and that is the whole distinction
+# the old single axis could not express.
+
+# What kind of hole this is. The wording of each is load-bearing in the report.
+GAP_NOT_RUN = "did not run"        # the check never executed at all
+GAP_INCOMPLETE = "incomplete"      # it started, ran out of budget, stopped
+GAP_VACUOUS = "nothing to test"    # it ran over zero inputs; a floor unapplied
+GAP_UNJUDGED = "no published limit"  # measured, but nothing to compare against
+
+
+@dataclass
+class Gap:
+    """One thing this run did not measure, and how much of the board that was.
+
+    `extent` is required in spirit even where it is empty in type: "the gap
+    check was incomplete" is not actionable and "2,317,884 of 4,010,552
+    candidate pairs on F.Cu were never compared" is. Requirement 4 of the task
+    that produced this file is exactly that -- budget exhaustion is not a skip,
+    it is an INCOMPLETE MEASUREMENT, and a measurement reports its extent.
+    """
+    check: str                  # which check has the hole
+    scope: str                  # "whole check", or the layer / object it is on
+    kind: str                   # one of the GAP_* constants above
+    why: str                    # why it did not happen
+    fix: str = ""               # what the caller does about it
+    extent: str = ""            # HOW MUCH went unmeasured
+
+    def line(self) -> str:
+        s = f"{self.check} / {self.scope}: {self.kind.upper()} -- {self.why}"
+        if self.extent:
+            s += f"\n        UNMEASURED: {self.extent}"
+        if self.fix:
+            s += f"\n        FIX: {self.fix}"
+        return s
+
+    def as_dict(self) -> dict:
+        return {"check": self.check, "scope": self.scope, "kind": self.kind,
+                "why": self.why, "fix": self.fix, "extent": self.extent}
 
 
 # --------------------------------------------------------------------------
@@ -2008,6 +2123,80 @@ def _probe_version(path: str) -> tuple[str, int]:
     return v, (int(m.group(1)) if m else -1)
 
 
+# --------------------------------------------------------------------------
+# Startup preflight: a missing hard dependency is loud HERE, not silent later
+# --------------------------------------------------------------------------
+
+def _venv_interpreters() -> list[str]:
+    """Interpreters in this repo's own .venv, if there is one. Named in the
+    preflight because "install shapely" is useless advice to somebody who ran
+    the right command under the wrong python -- they do not need a package,
+    they need the other interpreter, and it is already on their disk."""
+    root = Path(__file__).resolve().parent.parent
+    out = []
+    for rel in (".venv/bin/python3", ".venv/bin/python",
+                ".venv/Scripts/python.exe"):
+        p = root / rel
+        if p.exists():
+            out.append(str(p))
+    return out
+
+
+def preflight() -> tuple[list[str], list[Gap]]:
+    """What this interpreter can and cannot do, reported BEFORE any file.
+
+    THE SHAPE OF THE DEFECT THIS EXISTS FOR. The ink-floor check is the only
+    check in this harness that measures the INSCRIBED width of a filled region
+    and the only one that can see a gap inside a single polygon. It needs
+    shapely. Run under an interpreter without shapely -- KiCad's bundled
+    python, say -- it reported SKIP at check time, three hundred lines into a
+    report nobody reads to the end, and the run summarised green.
+
+    Saying it at startup does not by itself fix that (the gap machinery does),
+    but it moves the sentence to where the operator is still looking at the
+    screen, and it names the interpreter that WOULD work.
+
+    -> (lines to print, gaps to attach to every file in the run)
+    """
+    lines, gaps = [], []
+    if ink_measure is None:
+        why = (f"tools/ink_measure.py could not be imported: {_INK_IMPORT_ERR}")
+        ok = False
+    else:
+        ok, w = ink_measure.available()
+        why = w
+    if ok:
+        return lines, gaps
+
+    alts = _venv_interpreters()
+    lines.append("")
+    lines.append("  !!  THE INK-FLOOR CHECK CANNOT RUN UNDER THIS INTERPRETER")
+    lines.append(f"      python     : {sys.executable}")
+    lines.append(f"      reason     : {why}")
+    lines.append("      ink-floor is the ONLY check that measures the inscribed")
+    lines.append("      width of a filled region, and the ONLY one that can see")
+    lines.append("      a gap inside a single polygon. Traced letterforms,")
+    lines.append("      dithered stipple and keyhole-bridged glyphs are")
+    lines.append("      measured by it and by nothing else. Without it this run")
+    lines.append("      does not measure them AT ALL -- it does not measure")
+    lines.append("      them approximately.")
+    fix = "install shapely, or run under an interpreter that has it"
+    if alts:
+        lines.append("      this repo already has an interpreter for it:")
+        for a in alts:
+            lines.append(f"        {a} tools/verify_art.py ...")
+        fix = f"run under {alts[0]} (this repo's .venv), which has shapely"
+    else:
+        lines.append("      fix        : pip install shapely, in the venv you")
+        lines.append("                   run this harness from")
+    lines.append("      the run continues, but it CANNOT report a pass: see")
+    lines.append("      the CHECKS THAT DID NOT RUN block at the end.")
+    lines.append("")
+    gaps.append(Gap("ink-floor", "whole check", GAP_NOT_RUN, why, fix,
+                    "every floor-bearing layer of every file in this run"))
+    return lines, gaps
+
+
 @dataclass
 class CliChoice:
     path: str | None = None
@@ -2096,6 +2285,16 @@ class Check:
     exempt: int = 0
     stale: int = 0
     exemptions: list = field(default_factory=list)
+    # COVERAGE, the second axis. Everything this check did NOT measure. See
+    # the Gap docstring above: a gap never moves `level`, it binds the run.
+    gaps: list = field(default_factory=list)
+
+    def gap(self, scope: str, kind: str, why: str, fix: str = "",
+            extent: str = "") -> "Check":
+        """Record a hole and return self, so a `return Check(...).gap(...)`
+        reads as one statement at the site that could not measure."""
+        self.gaps.append(Gap(self.key, scope, kind, why, fix, extent))
+        return self
 
 
 # --- 1. loads in KiCad ------------------------------------------------------
@@ -2107,7 +2306,13 @@ def check_kicad_load(path: Path, cfg) -> Check:
                      "kicad-cli NOT FOUND -- this file is UNVERIFIED against KiCad",
                      ["searched PATH, $KICAD_CLI and the usual install dirs",
                       "pass --kicad-cli /path/to/kicad-cli to fix",
-                      "this is NOT a pass: nothing confirmed the file loads"])
+                      "this is NOT a pass: nothing confirmed the file loads"]
+                     ).gap("whole check", GAP_NOT_RUN,
+                           "no kicad-cli was found, so KiCad itself never "
+                           "parsed this file",
+                           "pass --kicad-cli /path/to/kicad-cli",
+                           "whether this file loads in KiCad at all, and the "
+                           "fp export svg cross-check of every letterform")
     if cfg.cli_major < MIN_KICAD_MAJOR:
         return Check("kicad-load", SKIP,
                      f"kicad-cli is version {cfg.kicad_version}, need "
@@ -2117,9 +2322,16 @@ def check_kicad_load(path: Path, cfg) -> Check:
                       f"(version 20241229) footprint and would report a bogus "
                       f"failure, so the check was not run at all",
                       "pass --kicad-cli /path/to/kicad-10/kicad-cli to fix",
-                      "this is NOT a pass"])
+                      "this is NOT a pass"]
+                     ).gap("whole check", GAP_NOT_RUN,
+                           f"kicad-cli {cfg.kicad_version} is older than "
+                           f"{MIN_KICAD_MAJOR} and cannot parse this format",
+                           "pass --kicad-cli /path/to/kicad-10/kicad-cli",
+                           "whether this file loads in KiCad at all, and the "
+                           "fp export svg cross-check of every letterform")
 
     details = []
+    no_plot = False
     with tempfile.TemporaryDirectory(prefix="verify_art_") as td:
         tmp = Path(td)
         lib = tmp / "in.pretty"
@@ -2206,8 +2418,21 @@ def check_kicad_load(path: Path, cfg) -> Check:
                 cfg.render_svg = None
         else:
             details.append("fp export svg: skipped (--no-render)")
+            no_plot = True
 
-    return Check("kicad-load", PASS, f"loads in KiCad {cfg.kicad_version}", details)
+    c = Check("kicad-load", PASS, f"loads in KiCad {cfg.kicad_version}", details)
+    if no_plot:
+        # The load succeeded, so the LEVEL is a genuine pass -- but the plot
+        # cross-check did not happen, and that cross-check is the only evidence
+        # that the letterforms this harness measured are the letterforms KiCad
+        # will image. A pass with that missing is a smaller pass than a pass
+        # with it, and the report has to be able to tell them apart.
+        c.gap("fp export svg", GAP_NOT_RUN,
+              "--no-render: KiCad was not asked to plot the part",
+              "drop --no-render",
+              "the cross-check of every expanded letterform against KiCad's "
+              "own plot -- the expansion is modelled but not corroborated")
+    return c
 
 
 # --- 2. size budget ---------------------------------------------------------
@@ -2800,7 +3025,8 @@ def classify_edge_pair(p1, p2, p3, p4, tol=1e-9):
 def check_self_intersection(fp: Footprint, cfg) -> Check:
     hits = []
     slits = 0
-    checked = skipped = 0
+    checked = skipped = skipped_pts = 0
+    skipped_where: list[str] = []
     for i, it in polys_of(fp):
         pts = [p for j, p in enumerate(it.pts)
                if j == 0 or abs(p[0] - it.pts[j-1][0]) > DUP_EPS
@@ -2809,6 +3035,10 @@ def check_self_intersection(fp: Footprint, cfg) -> Check:
             continue
         if len(pts) > cfg.max_poly_pts:
             skipped += 1
+            skipped_pts += len(pts)
+            skipped_where.append(f"{item_label(i, it)} on "
+                                 f"{'/'.join(it.layers) or '?'} "
+                                 f"({len(pts):,} vertices)")
             continue
         checked += 1
         e = edges_of(pts, closed=True)
@@ -2854,7 +3084,17 @@ def check_self_intersection(fp: Footprint, cfg) -> Check:
         head = f"no self-intersections ({slits} hole-bridge slits)"
     else:
         head = "no self-intersections"
-    return Check("self-isect", level, head, details)
+    c = Check("self-isect", level, head, details)
+    if skipped:
+        c.gap("large polygons", GAP_NOT_RUN,
+              f"{skipped} polygon(s) exceed the {cfg.max_poly_pts:,}-vertex "
+              f"limit and the O(n^2) pair scan was not run on them",
+              "raise --max-poly-pts",
+              f"{skipped} of {checked + skipped} polygon(s), "
+              f"{skipped_pts:,} vertices: " + "; ".join(skipped_where[:3])
+              + (f" (+{len(skipped_where)-3} more)"
+                 if len(skipped_where) > 3 else ""))
+    return c
 
 
 # --------------------------------------------------------------------------
@@ -3164,6 +3404,7 @@ class SweepTable:
         level = INFO
         n_exempt = n_stale = 0
         rows = []
+        gaps: list[Gap] = []
         for d in sorted(self.decls, key=lambda z: (z.owner_name, z.block,
                                                    z.quantity, z.layer)):
             floor, cls, _prov = _floor_for(d.layer, cfg.palette, fp.is_board)
@@ -3172,6 +3413,21 @@ class SweepTable:
                 n_exempt += d.n_matched
             if state == "STALE":
                 n_stale += 1
+            if state == "NOT EXERCISED" and lv == SKIP:
+                # The declaration says "this rung is deliberately under the
+                # floor". The check that would have measured the rung did not
+                # run, so the artefact's claim about itself is UNTESTED -- and
+                # an untested claim in a calibration ladder is the whole thing
+                # the ladder exists to produce.
+                gaps.append(Gap(
+                    "exempt", f"{d.block} {d.quantity} on {d.layer}",
+                    GAP_NOT_RUN,
+                    "the check that would judge this declaration did not run, "
+                    "so the declaration proves nothing",
+                    "run the check this declaration is about",
+                    f"the artefact declares {d.quantity} {d.band_str()} mm on "
+                    f"{d.layer} and NOTHING in this run measured whether that "
+                    f"is what it actually built"))
             level = worst(level, lv)
             head = (f"  {d.block:<10} {d.layer:<8} {d.quantity:<6} "
                     f"{d.band_str():<14} {d.active_box}  "
@@ -3232,6 +3488,7 @@ class SweepTable:
         c.exempt = n_ex_total
         c.stale = n_stale
         c.exemptions = [self._as_json(d, cfg, fp) for d in self.decls]
+        c.gaps = gaps
         return c
 
     def _state(self, d, floor):
@@ -3396,6 +3653,7 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
     # sighted on F.Cu.
     exempted: dict[str, list] = {}
     cur_item = {"i": 0, "it": None}
+    gaps: list[Gap] = []
 
     def note(layer, w, desc):
         if w is None or w <= 0:
@@ -3577,6 +3835,13 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
                 f"measurement of the ink), and the ink-floor check did not run "
                 f"on this layer, so nothing here measured them. This is the "
                 f"case that shipped 0.117 mm silk past a green run")
+            gaps.append(Gap(
+                "min-feature", layer, GAP_NOT_RUN,
+                "concave filled areas cannot be measured by a convex-hull "
+                "caliper, and the ink-floor check did not run on this layer",
+                "run the ink-floor check (shapely, and not --no-ink)",
+                f"{len(ws)} concave filled area(s) on {layer}; the narrowest "
+                f"feature on each is UNKNOWN, bounded above by {ub:.4f} mm"))
 
     n_exempt = 0
     for layer in sorted(set(narrowest) | set(exempted)):
@@ -3609,6 +3874,22 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
             details.append(tag + "  (no fabrication floor for this layer)")
             continue
         mark = f"{floor:.4f} mm{' PROVISIONAL' if prov else ''}"
+        if prov:
+            # NO PUBLISHED FLOOR. docs/pcb-palette.md states no buried-tone
+            # number at all; FLOOR_BURIED is a guess this file made up, and
+            # cal_buried exists precisely because nobody knows it yet. Passing
+            # a feature against an invented limit is not a measurement against
+            # a limit, and the run must not be able to call it one.
+            gaps.append(Gap(
+                "min-feature", layer, GAP_UNJUDGED,
+                f"the buried-tone floor ({floor:.2f} mm) is PROVISIONAL -- "
+                f"docs/pcb-palette.md publishes no number for it and this one "
+                f"is a guess made by this harness",
+                "--floor-buried <mm> once cal_buried has been read, which "
+                "also marks the number as no longer provisional",
+                f"{layer}: the narrowest feature ({w:.4f} mm) was compared "
+                f"against an invented limit, so neither a pass nor a fail on "
+                f"this layer means anything yet"))
         if w < floor - 1e-9:
             level = worst(level, _severity(cls, pal))
             problems.append(f"BELOW FLOOR: {layer} {w:.4f} mm < {mark} ({cls}) "
@@ -3641,6 +3922,16 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
                 f"all. That is NOT a floor violation -- no fabricator states a "
                 f"minimum opening -- but nothing here can say this images "
                 f"either. Ask them before ordering")
+            gaps.append(Gap(
+                "min-feature", layer, GAP_UNJUDGED,
+                f"no profile in tools/fab_profiles.py publishes a minimum "
+                f"mask OPENING, and this one ({w:.4f} mm) is finer than the "
+                f"{dam:.4f} mm dam, the finest mask feature the process "
+                f"states anywhere",
+                "ask the fabricator what their minimum mask opening is, "
+                "before ordering",
+                f"{layer}: the narrowest opening is outside every number "
+                f"this process publishes, so nothing here judged it"))
 
     details += no_ink
     for layer in sorted(unmeasured):
@@ -3651,6 +3942,13 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
                         f"feature on this layer is UNKNOWN -- which is not the "
                         f"same as clean: " + "; ".join(why[:3])
                         + (f" (+{len(why)-3} more)" if len(why) > 3 else ""))
+        gaps.append(Gap(
+            "min-feature", layer, GAP_NOT_RUN,
+            f"{len(why)} item(s) on this layer have geometry this harness "
+            f"could not derive: " + "; ".join(why[:3])
+            + (f" (+{len(why)-3} more)" if len(why) > 3 else ""),
+            "model the construct, or remove it from the artwork",
+            f"{layer}: the narrowest feature is UNKNOWN, not clean"))
 
     # Text height is a legibility floor separate from stroke width. Aggregated
     # per layer: a ladder of small labels would otherwise bury everything else.
@@ -3758,11 +4056,19 @@ def check_min_feature(fp: Footprint, cfg) -> Check:
         level = SKIP
         head = ("NO FLOOR WAS EXERCISED -- no layer here has a feature width to "
                 "compare against a limit")
+        gaps.append(Gap(
+            "min-feature", "whole check", GAP_VACUOUS,
+            "no layer in this file produced a feature width, so no floor was "
+            "ever applied to anything",
+            "check that the artwork is on the layers you think it is",
+            "every fabrication floor: this check compared 0 measurements"))
     if n_exempt:
         # The level is NOT touched by exempt findings: an exemption moves a
         # finding, it never changes how bad the rest of the check was.
         head += f" ({n_exempt} exempt by declaration)"
-    return Check("min-feature", level, head, details + problems)
+    c = Check("min-feature", level, head, details + problems)
+    c.gaps = gaps
+    return c
 
 
 def _signed_area2(loop) -> float:
@@ -4007,6 +4313,28 @@ def _candidate_pairs(feats: list[Feat], reach: float, max_span=16):
 GAP_MARGIN_REACH = 2.0
 GAP_MARGIN_BUDGET = 2_000_000
 
+# How many un-examined candidate pairs to count before giving up and reporting
+# a lower bound instead. Counting is index-only -- no geometry, no _feature_gap
+# -- so this is cheap next to the work the check already did before it ran out.
+_DRAIN_CAP = 20_000_000
+
+
+def _drain_count(gen, cap: int) -> tuple[int, bool]:
+    """How many items are LEFT in a generator that was stopped early.
+
+    -> (count, capped). `capped` True means the real number is at least
+    `count`, and the report must say so rather than quote a total it does not
+    have. Existing to answer requirement 4: a measurement that ran out of
+    budget has to say how much of the board it did not measure, and "how much"
+    for the gap check is exactly this.
+    """
+    n = 0
+    for _ in gen:
+        n += 1
+        if n >= cap:
+            return n, True
+    return n, False
+
 
 def _narrowest_separated_gap(feats: list, reach: float, budget: int,
                              skip=None):
@@ -4068,7 +4396,13 @@ def check_clearance(fp: Footprint, cfg) -> Check:
     this check could not see.
     """
     if not cfg.clearance:
-        return Check("clearance", SKIP, "skipped (--no-clearance)")
+        return Check("clearance", SKIP, "skipped (--no-clearance)",
+                     ["nothing measured any gap on any layer; this is not a "
+                      "pass"]
+                     ).gap("whole check", GAP_NOT_RUN,
+                           "--no-clearance", "drop --no-clearance",
+                           "every mask dam and every copper-to-copper spacing "
+                           "on every layer of this file")
 
     by_layer, excluded, expanded = clearance_features(fp, cfg)
     sweeps = getattr(cfg, "sweeps", None)
@@ -4092,6 +4426,7 @@ def check_clearance(fp: Footprint, cfg) -> Check:
     n_tested_layers = 0
     n_untested_layers = 0
     total_pairs = 0
+    gaps: list[Gap] = []
 
     if expanded[0]:
         details.append(f"  text       {expanded[0]} text item(s) expanded into "
@@ -4115,6 +4450,15 @@ def check_clearance(fp: Footprint, cfg) -> Check:
                            f"TESTED: a gap needs two features, so the "
                            f"{floor:.4f} mm {cls} limit was not applied to "
                            f"anything on this layer")
+            gaps.append(Gap(
+                "clearance", layer, GAP_VACUOUS,
+                f"{n} feature(s) form 0 pairs, so the {floor:.4f} mm {cls} "
+                f"limit was never applied to anything on this layer",
+                "nothing to fix in the tool -- but a layer whose spacing was "
+                "never tested has not been cleared for spacing",
+                f"{layer}: 0 of 0 pair(s) compared. Note this does NOT mean "
+                f"the layer is clean; a single polygon can still contain a "
+                f"sub-floor void, which only the ink-floor check can see"))
             continue
         if n > cfg.max_clearance_items:
             level = worst(level, WARN)
@@ -4123,6 +4467,13 @@ def check_clearance(fp: Footprint, cfg) -> Check:
                            f"{cfg.max_clearance_items} limit, gap check NOT RUN "
                            f"(raise --max-clearance-items). These gaps are "
                            f"UNCHECKED, not clean.")
+            gaps.append(Gap(
+                "clearance", layer, GAP_NOT_RUN,
+                f"{n:,} features is over the "
+                f"{cfg.max_clearance_items:,} --max-clearance-items limit",
+                "raise --max-clearance-items",
+                f"{layer}: all {n_possible:,} possible pair(s) -- 100% of "
+                f"this layer's spacing -- went uncompared"))
             continue
 
         f2 = floor * floor
@@ -4139,7 +4490,16 @@ def check_clearance(fp: Footprint, cfg) -> Check:
         n_exempt = 0
         exempt_blocks: dict = {}
 
-        for a, b in _candidate_pairs(feats, floor):
+        # The generator is held in a name so that, when the budget runs out,
+        # the REMAINDER can be counted. See the incomplete branch below: a
+        # measurement that stopped early has to say how much it did not do,
+        # and "how much" here is exactly the pairs left in this generator.
+        cand = _candidate_pairs(feats, floor)
+        n_cand_seen = 0
+        stopped_at = -1
+        for a, b in cand:
+            n_cand_seen += 1
+            stopped_at = a
             fa, fb = feats[a], feats[b]
             if fa.net and fa.net == fb.net:
                 # SAME NET. A track, the via it lands on and the pour it feeds
@@ -4208,10 +4568,37 @@ def check_clearance(fp: Footprint, cfg) -> Check:
         if incomplete:
             level = worst(level, WARN)
             n_skipped += 1
+            # BUDGET EXHAUSTION IS NOT A SKIP, IT IS AN INCOMPLETE MEASUREMENT,
+            # and a measurement that stopped early states how far it got. The
+            # generator is still live at the break, so draining it counts the
+            # candidate pairs that were never reached -- index work only, no
+            # geometry, so this costs a fraction of what the check already
+            # spent. Capped, because on a pathological layer the remainder can
+            # itself be enormous, and then the honest report is a lower bound.
+            n_left, capped = _drain_count(cand, _DRAIN_CAP)
+            tot = n_cand_seen + n_left
+            frac = (f"{n_cand_seen:,} of {'>=' if capped else ''}{tot:,} "
+                    f"candidate pair(s)")
+            pct = (100.0 * n_left / tot) if tot else 0.0
+            extent = (f"{layer}: examined {frac}; "
+                      f"{'>=' if capped else ''}{n_left:,} pair(s) "
+                      f"({'<=' if capped else ''}{pct:.1f}% of this layer's "
+                      f"candidates) were NEVER COMPARED. It stopped while "
+                      f"examining feature {stopped_at:,} of {n:,}; the grid "
+                      f"walk is mostly in index order, so the spacing around "
+                      f"the later features on {layer} is where the unmeasured "
+                      f"pairs are concentrated")
             details.append(f"  {layer:<10} gap check INCOMPLETE -- exhausted the "
                            f"{cfg.clearance_budget:,}-operation budget with "
-                           f"{n} features. Remaining gaps are UNCHECKED "
-                           f"(raise --clearance-budget).")
+                           f"{n} features after {frac}. Remaining gaps are "
+                           f"UNCHECKED (raise --clearance-budget).")
+            details.append(f"  {layer:<10} UNMEASURED: {extent}")
+            gaps.append(Gap(
+                "clearance", layer, GAP_INCOMPLETE,
+                f"the {cfg.clearance_budget:,}-operation budget ran out "
+                f"part-way through this layer",
+                "raise --clearance-budget",
+                extent))
         else:
             n_tested_layers += 1
             if sweeps is not None:
@@ -4279,6 +4666,14 @@ def check_clearance(fp: Footprint, cfg) -> Check:
                         f"check cannot represent, so any gap involving them is "
                         f"UNCHECKED rather than clean: " + "; ".join(why[:3])
                         + (f" (+{len(why)-3} more)" if len(why) > 3 else ""))
+        gaps.append(Gap(
+            "clearance", layer, GAP_NOT_RUN,
+            f"{len(why)} item(s) on this layer cannot be represented as gap "
+            f"features: " + "; ".join(why[:3])
+            + (f" (+{len(why)-3} more)" if len(why) > 3 else ""),
+            "model the construct, or remove it from the artwork",
+            f"{layer}: every gap involving those {len(why)} item(s) is "
+            f"uncompared"))
 
     counter_problems, n_counters = _counter_problems(fp, cfg, details)
     problems += counter_problems
@@ -4289,6 +4684,13 @@ def check_clearance(fp: Footprint, cfg) -> Check:
         level = SKIP
         head = ("NOTHING TESTED -- no layer here has two features to form a "
                 "gap between")
+        if not gaps:
+            gaps.append(Gap(
+                "clearance", "whole check", GAP_VACUOUS,
+                "no layer in this file has two features to form a gap "
+                "between, so no spacing limit was applied to anything",
+                "",
+                "every spacing floor: this check compared 0 pair(s)"))
     elif level == PASS:
         head = (f"all gaps above floor ({total_pairs} pair(s) over "
                 f"{n_tested_layers} layer(s)"
@@ -4304,7 +4706,9 @@ def check_clearance(fp: Footprint, cfg) -> Check:
         head = f"{n_skipped} layer(s) NOT FULLY CHECKED -- see details"
     if n_exempt_total:
         head += f" ({n_exempt_total} exempt by declaration)"
-    return Check("clearance", level, head, details + problems)
+    c = Check("clearance", level, head, details + problems)
+    c.gaps = gaps
+    return c
 
 
 def _counter_problems(fp: Footprint, cfg, details: list) -> tuple[list[str], int]:
@@ -4512,6 +4916,36 @@ def _ink_parts(fp: Footprint, cfg):
     return parts, missing
 
 
+def _ink_fix_hint() -> str:
+    alts = _venv_interpreters()
+    if alts:
+        return (f"run under {alts[0]} (this repo's .venv, which has shapely) "
+                f"-- not under KiCad's bundled python, which does not")
+    return "pip install shapely into the venv you run this harness from"
+
+
+_INK_FIX_HINT = _ink_fix_hint()
+
+
+def _ink_extent(fp: Footprint, pal: Palette) -> str:
+    """What the ink check WOULD have covered, for a gap that says how much of
+    the board went unmeasured. Counted from the items themselves, so it is
+    available on the early-return paths where nothing has been measured yet."""
+    per: dict[str, int] = {}
+    for it in fp.items:
+        for l in it.layers:
+            floor, cls, _p = _floor_for(l, pal, fp.is_board)
+            if floor is None or cls == "edge":
+                continue
+            per[l] = per.get(l, 0) + 1
+    if not per:
+        return "no layer in this file carries ink with a fabrication floor"
+    tot = sum(per.values())
+    named = ", ".join(f"{l} ({n:,} item(s))" for l, n in sorted(per.items()))
+    return (f"the inscribed width and the region gaps on ALL {len(per)} "
+            f"floor-bearing layer(s), {tot:,} item(s): {named}")
+
+
 def check_ink(fp: Footprint, cfg) -> Check:
     """The narrowest INK and the narrowest GAP on each layer, measured on the
     region rather than item by item.
@@ -4533,20 +4967,34 @@ def check_ink(fp: Footprint, cfg) -> Check:
     fabricator publishes a minimum, so it is reported and NOT judged) and the
     narrowest "gap" is the dam, which is what the mask floor is about.
     """
+    extent = _ink_extent(fp, cfg.palette)
     if not getattr(cfg, "ink", True):
         return Check("ink-floor", SKIP, "skipped (--no-ink)",
-                     ["nothing measured the ink region; this is not a pass"])
+                     ["nothing measured the ink region; this is not a pass"]
+                     ).gap("whole check", GAP_NOT_RUN, "--no-ink",
+                           "drop --no-ink", extent)
     if ink_measure is None:
         return Check("ink-floor", SKIP,
                      "NOT MEASURED -- tools/ink_measure.py could not be imported",
                      [_INK_IMPORT_ERR,
                       "no width or gap on any layer was measured on the region; "
-                      "this is not a pass"])
+                      "this is not a pass"]
+                     ).gap("whole check", GAP_NOT_RUN,
+                           f"tools/ink_measure.py could not be imported: "
+                           f"{_INK_IMPORT_ERR}",
+                           _INK_FIX_HINT, extent)
     ok, why = ink_measure.available()
     if not ok:
+        # THE ONE. This is the branch that reported SKIP under KiCad's bundled
+        # python, where shapely is not installed, and let the harness summarise
+        # a FAILING board as "0 pass, 1 warn, 0 fail ... No hard failures" and
+        # exit 0. The text here was already honest. What it lacked was any way
+        # to bind the run, which is what the Gap does.
         return Check("ink-floor", SKIP, "NOT MEASURED -- " + why.split(",")[0],
                      [why, "no width or gap on any layer was measured on the "
-                           "region; this is not a pass"])
+                           "region; this is not a pass"]
+                     ).gap("whole check", GAP_NOT_RUN, why, _INK_FIX_HINT,
+                           extent)
 
     pal = cfg.palette
     parts, missing = _ink_parts(fp, cfg)
@@ -4557,6 +5005,11 @@ def check_ink(fp: Footprint, cfg) -> Check:
     judged = 0
     n_exempt_total = 0
     measured_layers: set[str] = set()
+    gaps: list[Gap] = []
+    # Ink area, mm2, split into what was really measured and what was not.
+    # This is the run's answer to "how much of the board went unmeasured",
+    # in the only unit that means anything on a board: area of art.
+    area_ok = area_gone = 0.0
 
     for note in fp.notes:
         details.append("  ! " + note)
@@ -4578,6 +5031,12 @@ def check_ink(fp: Footprint, cfg) -> Check:
             details.append(f"  {layer:<10} NOT MEASURED: excluded by "
                            f"--ink-layers")
             level = worst(level, SKIP)
+            gaps.append(Gap(
+                "ink-floor", layer, GAP_NOT_RUN,
+                "excluded by --ink-layers",
+                f"add {layer} to --ink-layers, or drop the flag",
+                f"{layer}: {len(parts.get(layer, ()))} ink part(s), inscribed "
+                f"width and region gaps both unmeasured"))
             continue
         mask = (cls == "mask")
         exempt_fn = None
@@ -4603,6 +5062,11 @@ def check_ink(fp: Footprint, cfg) -> Check:
         if not r.ok:
             level = worst(level, SKIP)
             problems.append(f"NOT MEASURED: {layer} -- {r.why}")
+            gaps.append(Gap(
+                "ink-floor", layer, GAP_NOT_RUN, r.why, _INK_FIX_HINT,
+                f"{layer}: {len(parts.get(layer, ()))} ink part(s); no region "
+                f"was built, so neither the inscribed width nor the gaps on "
+                f"this layer exist"))
             continue
         if r.n_components == 0:
             details.append(f"  {layer:<10} no ink")
@@ -4625,12 +5089,37 @@ def check_ink(fp: Footprint, cfg) -> Check:
                 + "; ".join(missing[layer][:3])
                 + (f" (+{len(missing[layer])-3} more)"
                    if len(missing[layer]) > 3 else ""))
+            gaps.append(Gap(
+                "ink-floor", layer, GAP_NOT_RUN,
+                f"{len(missing[layer])} item(s) on this layer could not be "
+                f"turned into ink: " + "; ".join(missing[layer][:3])
+                + (f" (+{len(missing[layer])-3} more)"
+                   if len(missing[layer]) > 3 else ""),
+                "model the construct, or remove it from the artwork",
+                f"{layer}: the region measured covers only {r.n_components} "
+                f"component(s) / {r.area:.3f} mm2 and is NOT the whole layer, "
+                f"so the width and gap numbers reported for it are not the "
+                f"whole answer"))
 
         if r.incomplete:
+            # NOT A SKIP -- AN INCOMPLETE MEASUREMENT. The region was built and
+            # the erosion numbers hold; what ran out was the boundary scan, so
+            # the report says which quantities survive and which do not, and
+            # how big the layer it gave up on was.
             level = worst(level, SKIP)
             problems.append(f"NOT MEASURED: {layer} -- {r.incomplete_why}")
+            area_gone += r.area
+            gaps.append(Gap(
+                "ink-floor", layer, GAP_INCOMPLETE, r.incomplete_why,
+                "raise --ink-max-segments / --ink-budget",
+                f"{layer}: the narrowest ink and the narrowest gap on "
+                f"{r.n_components:,} component(s) covering {r.area:.3f} mm2 "
+                f"-- 100% of this layer's ink -- were never computed "
+                f"({r.n_segments:,} boundary segments, "
+                f"{r.n_candidates:,} candidate pair(s))"))
         else:
             judged += 1
+            area_ok += r.area
             measured_layers.add(layer)
             if sweeps is not None:
                 sweeps.mark_exercised(layer, ("width", "gap", "vanish"))
@@ -4746,19 +5235,46 @@ def check_ink(fp: Footprint, cfg) -> Check:
             f"NOT MEASURED: {layer} has {len(missing[layer])} item(s) and NOT "
             f"ONE of them could be turned into ink, so this layer was not "
             f"measured at all: " + "; ".join(missing[layer][:3]))
+        gaps.append(Gap(
+            "ink-floor", layer, GAP_NOT_RUN,
+            f"not one of the {len(missing[layer])} item(s) on this layer "
+            f"could be turned into ink: " + "; ".join(missing[layer][:3]),
+            "model the construct, or remove it from the artwork",
+            f"{layer}: the whole layer. Nothing on it was measured"))
 
     cfg.ink_measured_layers = measured_layers
+    if area_gone > 0 and gaps:
+        # The run-level answer to "how much of the board went unmeasured",
+        # in mm2 of art rather than in layer names.
+        tot = area_ok + area_gone
+        gaps.append(Gap(
+            "ink-floor", "this file", GAP_INCOMPLETE,
+            "the region measurement did not cover the whole file",
+            "",
+            f"{area_gone:.3f} mm2 of {tot:.3f} mm2 of floor-bearing ink "
+            f"({100.0 * area_gone / tot:.1f}%) was never measured for "
+            f"inscribed width or region gaps"))
     if level == PASS and judged == 0:
         return Check("ink-floor", SKIP,
                      "NO LAYER WAS MEASURED -- nothing here has ink on a layer "
-                     "with a fabrication floor", details)
+                     "with a fabrication floor", details
+                     ).gap("whole check", GAP_VACUOUS,
+                           "no layer in this file has ink on a layer with a "
+                           "fabrication floor, so no floor was applied to "
+                           "anything",
+                           "check that the artwork is on the layers you think "
+                           "it is",
+                           "every fabrication floor: this check measured 0 "
+                           "layer(s)")
     if level == PASS:
         head = f"ink and gaps above floor on {judged} layer(s)"
     else:
         head = f"{len(problems)} finding(s) over {judged} measured layer(s)"
     if n_exempt_total:
         head += f" ({n_exempt_total} exempt by declaration)"
-    return Check("ink-floor", level, head, details + problems)
+    c = Check("ink-floor", level, head, details + problems)
+    c.gaps = gaps
+    return c
 
 
 # --------------------------------------------------------------------------
@@ -4776,7 +5292,8 @@ def check_inventory(fp: Footprint, cfg) -> Check:
     lands here by name, at SKIP, whether or not anyone has thought about it.
     """
     if not fp.is_board:
-        return Check("inventory", SKIP, "not a board")
+        # NOT APPLICABLE, not a hole. No Gap: see check_project_rules.
+        return Check("inventory", SKIP, "not a board (not applicable)")
     from collections import Counter
     top = {k: v for k, v in fp.head_counts.items() if "/" not in k}
     inner = {k.split("/", 1)[1]: v for k, v in fp.head_counts.items()
@@ -4805,13 +5322,20 @@ def check_inventory(fp: Footprint, cfg) -> Check:
     for label, lay, why in fp.unmeasured:
         by_reason[why].append((label, lay))
     problems = []
+    c = Check("inventory", SKIP,
+              f"{len(fp.unmeasured)} construct(s) NOT MEASURED", details)
     for why, rows in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
         ex = ", ".join(f"{l} on {y}" for l, y in rows[:3])
         problems.append(f"NOT MEASURED ({len(rows)}): {why} -- e.g. {ex}"
                         + (f" (+{len(rows)-3} more)" if len(rows) > 3 else ""))
-    return Check("inventory", SKIP,
-                 f"{len(fp.unmeasured)} construct(s) NOT MEASURED",
-                 details + problems[:cfg.max_report])
+        c.gap("board constructs", GAP_NOT_RUN, why,
+              "model the construct in this harness, or remove it from the "
+              "board",
+              f"{len(rows)} object(s) carrying geometry that NO check in this "
+              f"run measured: {ex}"
+              + (f" (+{len(rows)-3} more)" if len(rows) > 3 else ""))
+    c.details = details + problems[:cfg.max_report]
+    return c
 
 
 # --------------------------------------------------------------------------
@@ -4850,26 +5374,44 @@ def check_project_rules(fp: Footprint, cfg) -> Check:
     what check_ink() is for.
     """
     if not fp.is_board or fp.path is None:
-        return Check("project-rules", SKIP, "not a board")
+        # NOT APPLICABLE, not a hole: a footprint has no project file and no
+        # DRC to arm, so nothing went unmeasured. This site carries NO Gap,
+        # which is the distinction the old single axis could not make.
+        return Check("project-rules", SKIP, "not a board (not applicable)")
+    _armed = ("whether the DRC guarding this board is armed at all: "
+              + ", ".join(sorted(PRO_RULE_FLOORS))
+              + " -- and a 'DRC: 0 violations' on a board whose rules are 0.0 "
+                "tested nothing")
     pro = fp.path.with_suffix(".kicad_pro")
     if not pro.is_file():
         return Check("project-rules", SKIP,
                      "NOT MEASURED -- no sibling .kicad_pro",
                      [f"looked for {pro.name}",
                       "without it nothing here knows what DRC on this board is "
-                      "armed with, so a green DRC elsewhere means nothing"])
+                      "armed with, so a green DRC elsewhere means nothing"]
+                     ).gap("whole check", GAP_NOT_RUN,
+                           f"no sibling {pro.name}",
+                           f"put the project file next to the board, or check "
+                           f"the DRC rules by hand", _armed)
     try:
         doc = json.loads(pro.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError) as e:
         return Check("project-rules", SKIP,
-                     f"NOT MEASURED -- {pro.name} could not be read: {e}")
+                     f"NOT MEASURED -- {pro.name} could not be read: {e}"
+                     ).gap("whole check", GAP_NOT_RUN,
+                           f"{pro.name} could not be read: {e}",
+                           "repair the project file", _armed)
     rules = (((doc.get("board") or {}).get("design_settings") or {})
              .get("rules") or {})
     classes = (((doc.get("net_settings") or {}).get("classes")) or [])
     if not rules:
         return Check("project-rules", SKIP,
                      f"NOT MEASURED -- {pro.name} declares no "
-                     f"board.design_settings.rules")
+                     f"board.design_settings.rules"
+                     ).gap("whole check", GAP_NOT_RUN,
+                           f"{pro.name} declares no "
+                           f"board.design_settings.rules",
+                           "set the design rules in the project", _armed)
 
     pal = cfg.palette
     details, problems = [], []
@@ -4958,16 +5500,29 @@ def check_kicad_load_board(path: Path, fp: Footprint, cfg) -> Check:
     wildcard layers, via annuli -- is being applied the way KiCad applies it.
     """
     cli = cfg.cli
+    _board_extent = ("whether KiCad parses this board at all, and the "
+                     "independent copper-area cross-check that is the only "
+                     "evidence the footprint-placement transform in this "
+                     "harness matches the one KiCad applies")
     if not cli:
         return Check("kicad-load", SKIP,
                      "kicad-cli NOT FOUND -- this board is UNVERIFIED against "
                      "KiCad",
                      ["pass --kicad-cli /path/to/kicad-cli to fix",
-                      "this is NOT a pass: nothing confirmed the file loads"])
+                      "this is NOT a pass: nothing confirmed the file loads"]
+                     ).gap("whole check", GAP_NOT_RUN,
+                           "no kicad-cli was found",
+                           "pass --kicad-cli /path/to/kicad-cli",
+                           _board_extent)
     if cfg.cli_major < MIN_KICAD_MAJOR:
         return Check("kicad-load", SKIP,
                      f"kicad-cli is version {cfg.kicad_version}, need "
-                     f"{MIN_KICAD_MAJOR}+ -- this board is UNVERIFIED")
+                     f"{MIN_KICAD_MAJOR}+ -- this board is UNVERIFIED"
+                     ).gap("whole check", GAP_NOT_RUN,
+                           f"kicad-cli {cfg.kicad_version} is older than "
+                           f"{MIN_KICAD_MAJOR}",
+                           "pass --kicad-cli /path/to/kicad-10/kicad-cli",
+                           _board_extent)
     details = []
     with tempfile.TemporaryDirectory(prefix="verify_art_") as td:
         out = Path(td) / "stats.txt"
@@ -5046,17 +5601,66 @@ def check_kicad_load_board(path: Path, fp: Footprint, cfg) -> Check:
         elif side in got:
             details.append(f"{side.lower()} copper area: KiCad {got[side]:.3f} "
                            f"mm2; not cross-checked (no region measurement)")
+    c = Check("kicad-load", level, f"loads in KiCad {cfg.kicad_version}",
+              details)
     if not mine:
         details.append("copper area NOT cross-checked against KiCad's own "
                        "number, so the placement transform in this harness is "
                        "modelled but not corroborated")
-    return Check("kicad-load", level, f"loads in KiCad {cfg.kicad_version}",
-                 details)
+        # NOT APPLICABLE vs NOT DONE. A board with no copper on it has nothing
+        # to corroborate, and charging it a coverage gap would make every
+        # silk-only art board permanently INCOMPLETE for a check that was
+        # never going to say anything. The cross-check is applicable only where
+        # KiCad itself reports copper, and only then is its absence a hole.
+        if any(v > 0 for v in got.values()):
+            c.gap("copper-area cross-check", GAP_NOT_RUN,
+                  "KiCad reports copper on this board but this harness "
+                  "produced no copper region to compare it with (the ink "
+                  "region could not be built)",
+                  _INK_FIX_HINT,
+                  "the only independent evidence that footprint placement, "
+                  "rotation, wildcard layers and via annuli are being applied "
+                  "the way KiCad applies them")
+        else:
+            details.append("  -- not applicable: KiCad reports no copper on "
+                           "this board, so there is nothing to corroborate")
+    return c
 
 
 # --------------------------------------------------------------------------
 # Driver
 # --------------------------------------------------------------------------
+
+def unpublished_floors(key: str) -> list[tuple[str, str]]:
+    """(class, what) for every floor this named process does NOT publish.
+
+    OSH Park publishes no silkscreen minimum, for instance. apply_fab keeps the
+    palette doc's house number for those and says so -- but the number being
+    used is then guidance wearing a fabricator's name, and a comparison against
+    it is not a comparison against anything that fab has committed to. That is
+    "a profile with no published floor", and it is a coverage hole in exactly
+    the same sense as a check that did not run: nothing measured the artwork
+    against the process it will be built on.
+    """
+    prof = fab_profiles.PROFILES[key]
+    return [(cls, what) for cls, val, what in (
+        ("copper", prof.min_copper_mm, "trace width/spacing"),
+        ("silk", prof.min_silk_mm, "silkscreen stroke"),
+        ("mask", prof.min_mask_dam_mm, "mask dam")) if val is None]
+
+
+def _fab_gaps(check: Check, key: str, palette: Palette) -> Check:
+    for cls, what in unpublished_floors(key):
+        check.gap(f"{cls} floor", GAP_UNJUDGED,
+                  f"{fab_profiles.PROFILES[key].name} publishes no {what}, so "
+                  f"the {palette.floors[cls]:.4f} mm used for {cls} is the "
+                  f"palette doc's house guidance and not this fab's number",
+                  "ask the fabricator for their number before ordering",
+                  f"every {cls} comparison in this file was made against a "
+                  f"limit this process has not stated; a finding under it is "
+                  f"a WARN and not the FAIL a published limit would make it")
+    return check
+
 
 def apply_fab(palette: Palette, key: str) -> list[str]:
     """Overwrite a palette's fabrication floors from a named process.
@@ -5217,8 +5821,9 @@ def verify_board(path: Path, cfg) -> tuple[str, list[Check]]:
     cfg = _fresh_cfg(cfg)
     key = getattr(cfg, "fab", None)
     if key:
-        checks.append(Check("fab", INFO, f"floors from {key} (--fab)",
-                            apply_fab(cfg.palette, key)))
+        checks.append(_fab_gaps(
+            Check("fab", INFO, f"floors from {key} (--fab)",
+                  apply_fab(cfg.palette, key)), key, cfg.palette))
     else:
         checks.append(Check("fab", SKIP,
                             "NO FAB PROFILE -- floors are the palette doc's "
@@ -5229,7 +5834,18 @@ def verify_board(path: Path, cfg) -> tuple[str, list[Check]]:
                              "pass --fab <profile> to check it against the "
                              "process it will actually be built on; without it "
                              "a feature under the floor is a WARN, not a FAIL, "
-                             "because the number it is under is guidance"]))
+                             "because the number it is under is guidance"]
+                            ).gap("floors", GAP_UNJUDGED,
+                                  "no --fab profile: nothing in this file says "
+                                  "which process it was drawn for, so the "
+                                  "floors applied are the palette doc's house "
+                                  "guidance and not any fabricator's published "
+                                  "limit",
+                                  "pass --fab <profile>",
+                                  "every floor comparison in this run was made "
+                                  "against guidance, so a finding under it is "
+                                  "a WARN and not the FAIL it would be against "
+                                  "a real process"))
     try:
         cfg.sweeps = SweepTable(
             fp, cfg, enabled=not getattr(cfg, "no_sweep", False))
@@ -5259,14 +5875,42 @@ def verify_board(path: Path, cfg) -> tuple[str, list[Check]]:
         # meets every suspended judgement before the findings that cite it.
         checks.insert(at, cfg.sweeps.render(cfg, fp))
 
+    return _verdict(checks, cfg), checks
+
+
+def gaps_of(checks: list[Check]) -> list[Gap]:
+    """Every hole in one file's run, in check order."""
+    return [g for c in checks for g in c.gaps]
+
+
+def _verdict(checks: list[Check], cfg) -> str:
+    """One file's verdict, over BOTH axes.
+
+    The old line was
+
+        verdict = FAIL if lv == FAIL else (WARN if lv in (WARN, SKIP) else PASS)
+
+    and that single `else PASS` is where a run that measured nothing turned
+    into a run that found nothing. A skipped check collapsed into WARN, WARN
+    did not set the exit code, and the summary read "No hard failures".
+
+    Now: a FAIL is still a FAIL, because a defect that WAS found outranks one
+    that could not be looked for. Below that, ANY hole in coverage makes the
+    file INCOMPLETE, which is not a pass and never becomes one -- there is no
+    flag that turns INCOMPLETE into PASS, only --accept-gaps, which
+    acknowledges the hole at the exit code without renaming it.
+    """
     lv = PASS
     for c in checks:
         eff = c.level
         if cfg.strict and eff in (WARN, SKIP):
             eff = FAIL
         lv = worst(lv, eff)
-    verdict = FAIL if lv == FAIL else (WARN if lv in (WARN, SKIP) else PASS)
-    return verdict, checks
+    if lv == FAIL:
+        return FAIL
+    if gaps_of(checks):
+        return INCOMPLETE
+    return WARN if lv in (WARN, SKIP) else PASS
 
 
 def verify_file(path: Path, cfg) -> tuple[str, list[Check]]:
@@ -5322,7 +5966,9 @@ def verify_file(path: Path, cfg) -> tuple[str, list[Check]]:
 
     if key:
         lines = apply_fab(cfg.palette, key)
-        checks.append(Check("fab", INFO, f"floors from {key} ({why})", lines))
+        checks.append(_fab_gaps(
+            Check("fab", INFO, f"floors from {key} ({why})", lines),
+            key, cfg.palette))
     try:
         cfg.sweeps = SweepTable(
             fp, cfg, enabled=not getattr(cfg, "no_sweep", False))
@@ -5341,14 +5987,7 @@ def verify_file(path: Path, cfg) -> tuple[str, list[Check]]:
     if cfg.sweeps:
         checks.insert(at, cfg.sweeps.render(cfg, fp))
 
-    lv = PASS
-    for c in checks:
-        eff = c.level
-        if cfg.strict and eff in (WARN, SKIP):
-            eff = FAIL
-        lv = worst(lv, eff)
-    verdict = FAIL if lv == FAIL else (WARN if lv in (WARN, SKIP) else PASS)
-    return verdict, checks
+    return _verdict(checks, cfg), checks
 
 
 def main(argv=None) -> int:
@@ -5365,7 +6004,23 @@ def main(argv=None) -> int:
     ap.add_argument("--allow-layer", action="append", default=[],
                     metavar="LAYER", help="treat LAYER as on-palette (repeatable)")
     ap.add_argument("--strict", action="store_true",
-                    help="treat WARN and SKIP as failures")
+                    help="treat WARN and SKIP as failures. NOTE this is not a "
+                         "substitute for the coverage rules: several holes sit "
+                         "on checks whose LEVEL is PASS -- a layer with one "
+                         "feature and therefore no pair to compare, a plot "
+                         "cross-check skipped by --no-render -- so --strict "
+                         "never saw them. They are caught by the gap axis, "
+                         "which is always on")
+    ap.add_argument("--accept-gaps", action="store_true",
+                    help="acknowledge that some checks did not run, and exit 0 "
+                         "anyway if nothing FAILED. Without it a run in which "
+                         "any check was skipped, ran out of budget or had "
+                         "nothing to test exits 3, because a check that did "
+                         "not run must never contribute to a pass. The gaps "
+                         "are LISTED either way -- this flag accepts them, it "
+                         "does not hide them, and it never turns an INCOMPLETE "
+                         "file into a passing one. --strict overrides it: a "
+                         "SKIP is a FAIL there, and exit 1 wins over exit 0")
     ap.add_argument("--no-render", action="store_true",
                     help="skip the fp export svg plot check (faster)")
     ap.add_argument("--no-clearance", action="store_true",
@@ -5514,6 +6169,22 @@ def main(argv=None) -> int:
             print(f"  ! {n}")
         print()
 
+    # A MISSING HARD DEPENDENCY IS LOUD AT STARTUP, NOT SILENT AT THE CHECK.
+    # Printed before any file so the operator sees it while still watching the
+    # screen, rather than three hundred lines down inside one check's details.
+    # stderr as well as stdout: a caller that pipes stdout to a log and reads
+    # only the exit code still gets told to its face.
+    # The gaps preflight() returns are NOT attached here: check_ink() raises a
+    # per-file one that names the actual layers, which is strictly better, and
+    # a footprint-only run needs no ink measurement and must not be charged a
+    # gap for the absence of one.
+    pre_lines, _pre_gaps = preflight()
+    for ln in pre_lines:
+        print(ln, file=sys.stderr)
+    if pre_lines and not a.as_json:
+        for ln in pre_lines:
+            print(ln)
+
     def _exempt_of(cs):
         return (sum(c.exempt for c in cs), sum(c.stale for c in cs))
 
@@ -5541,8 +6212,10 @@ def main(argv=None) -> int:
     n_fail = sum(1 for _, v, _ in results if v == FAIL)
     n_warn = sum(1 for _, v, _ in results if v == WARN)
     n_pass = sum(1 for _, v, _ in results if v == PASS)
+    n_incomplete = sum(1 for _, v, _ in results if v == INCOMPLETE)
     n_exempt = sum(sum(c.exempt for c in cs) for _, _, cs in results)
     n_stale = sum(sum(c.stale for c in cs) for _, _, cs in results)
+    all_gaps = [(t, g) for t, _v, cs in results for g in gaps_of(cs)]
 
     if a.as_json:
         print(json.dumps({
@@ -5552,16 +6225,25 @@ def main(argv=None) -> int:
             "floors": palette.floors,
             "buried_floor_provisional": palette.buried_provisional,
             "sweep_declarations_honoured": not a.no_sweep,
+            "gaps_accepted": bool(a.accept_gaps),
             "summary": {"pass": n_pass, "warn": n_warn, "fail": n_fail,
+                        "incomplete": n_incomplete,
                         "total": len(results),
+                        "checks_did_not_run": len(all_gaps),
                         "exempt": n_exempt, "stale": n_stale},
             "files": [{
                 "path": str(t), "verdict": v,
                 "exempt": sum(c.exempt for c in cs),
                 "stale": sum(c.stale for c in cs),
                 "exemptions": [e for c in cs for e in c.exemptions],
+                # The worst LEVEL any check reached, kept beside the verdict:
+                # an INCOMPLETE file can still carry findings, and a consumer
+                # that only reads `verdict` would not see them.
+                "worst_level": worst(*[c.level for c in cs]) if cs else PASS,
+                "gaps": [g.as_dict() for g in gaps_of(cs)],
                 "checks": [{"key": c.key, "level": c.level,
-                            "headline": c.headline, "details": c.details}
+                            "headline": c.headline, "details": c.details,
+                            "gaps": [g.as_dict() for g in c.gaps]}
                            for c in cs],
             } for t, v, cs in results],
         }, indent=2))
@@ -5571,19 +6253,78 @@ def main(argv=None) -> int:
         # where judgement was suspended must not be byte-similar to one where
         # it was not, and a CI diff on this line catches a new exemption
         # appearing without anybody having to read the report.
-        print(f"SUMMARY: {n_pass} pass, {n_warn} warn, {n_fail} fail "
-              f"of {len(results)}   ({n_exempt} exempt, {n_stale} stale"
+        print(f"SUMMARY: {n_pass} pass, {n_warn} warn, {n_fail} fail, "
+              f"{n_incomplete} incomplete of {len(results)}   "
+              f"({n_exempt} exempt, {n_stale} stale"
               f"{'; NOT HONOURED --no-sweep' if a.no_sweep else ''})")
-        for t, v, _ in results:
-            if v != PASS:
-                print(f"  {v:<4} {t.name}")
+        for t, v, cs in results:
+            if v == PASS:
+                continue
+            # A file can be INCOMPLETE *and* carry findings, and then the
+            # "0 warn" in the line above is about the VERDICT column, not about
+            # the report. Say so on the file's own line rather than letting a
+            # reader take "0 warn" for "no warnings".
+            lv = worst(*[c.level for c in cs]) if cs else PASS
+            extra = (f"   (findings: {lv})"
+                     if v == INCOMPLETE and lv in (WARN, FAIL) else "")
+            print(f"  {v:<10} {t.name}{extra}")
+
+        # WHAT DID NOT RUN, AND HOW MUCH OF THE BOARD THAT WAS. Printed even
+        # under --quiet: this block is the one thing a caller must not be able
+        # to miss, because missing it is the defect.
+        if all_gaps:
+            print()
+            print(f"{len(all_gaps)} CHECK(S) DID NOT RUN OR DID NOT FINISH. A "
+                  f"check that did not run cannot")
+            print("contribute to a pass, and none of the files below has been "
+                  "cleared of what")
+            print("the missing check exists to catch:")
+            cur = None
+            for t, g in all_gaps:
+                if t != cur:
+                    print(f"  {t.name}")
+                    cur = t
+                print("      " + g.line().replace("\n", "\n      "))
+
         if n_fail:
             print("\nFAIL -- do not ship these.")
+            if all_gaps:
+                # And do not read the FAIL as the whole story: fixing what
+                # failed leaves the unmeasured part still unmeasured, and the
+                # next run will say so with exit 3.
+                print(f"Note also the {len(all_gaps)} check(s) above that did "
+                      f"not run. Fixing what FAILED does not")
+                print("measure what was never measured; expect exit 3 on the "
+                      "next run until those close.")
+        elif n_incomplete and not a.accept_gaps:
+            print("\nINCOMPLETE -- NOT A PASS. This run did not measure "
+                  "everything it exists to")
+            print("measure, so nothing here says these files are shippable. "
+                  "Close the gaps")
+            print("listed above and run again, or pass --accept-gaps to "
+                  "acknowledge them")
+            print("deliberately (which changes the exit code, not the verdict).")
+        elif n_incomplete:
+            print("\nINCOMPLETE, ACCEPTED (--accept-gaps). Nothing FAILED, but "
+                  "the checks listed")
+            print("above did not run. This is still not a clean pass.")
         elif n_warn:
             print("\nNo hard failures. Warnings above are fabrication risks, not "
                   "KiCad errors; review before shipping (--strict to enforce).")
 
-    return 1 if n_fail else 0
+    # EXIT STATUS.
+    #   0  every file passed and every check ran
+    #   1  at least one FAIL
+    #   2  harness error (bad arguments, unreadable palette)
+    #   3  no FAIL, but at least one check did not run -- the case that used to
+    #      exit 0 with "No hard failures" over a board the harness had not
+    #      looked at. --accept-gaps downgrades this to 0; nothing downgrades it
+    #      silently.
+    if n_fail:
+        return 1
+    if n_incomplete and not a.accept_gaps:
+        return 3
+    return 0
 
 
 if __name__ == "__main__":
