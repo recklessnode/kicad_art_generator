@@ -1860,8 +1860,13 @@ def format_tedit() -> str:
 
 
 def make_fp_text(kind: str, text: str, y_pos: float) -> str:
+    # `unlocked` inside (at ...) is this legacy (module ...) format's spelling
+    # of keep_upright FALSE -- without it KiCad loads the text with "Keep
+    # upright" ON and the glyphs refuse to follow a 180/270 degree footprint
+    # rotation. Verified round-trip against pcbnew 10.0: bare `unlocked` in
+    # `at` reads back IsKeepUpright() == False.
     return (
-        f"(fp_text {kind} {text} (at 0 {y_pos}) (layer F.SilkS) hide "
+        f"(fp_text {kind} {text} (at 0 {y_pos} unlocked) (layer F.SilkS) hide "
         f"(effects (font (size 1.524 1.524) (thickness 0.3048))))"
     )
 

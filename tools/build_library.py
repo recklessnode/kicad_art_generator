@@ -26,6 +26,16 @@ and named again at the end, and --strict turns a WARN into a failure for
 anyone who wants the stricter contract. A warning whose content lives only in
 a JSON file is not a warning.
 
+A piece whose verdict is INCOMPLETE is also installed, and is NOT the same
+thing as a WARN. A WARN is verify_art having measured something and not liked
+the number. INCOMPLETE is verify_art not having measured it at all -- a missing
+shapely, a budget exhausted, a layer with nothing to compare. verify_art used
+to collapse the two, and a board that FAILS its own fab profile was reported as
+"0 pass, 1 warn, 0 fail ... No hard failures" under an interpreter that could
+not load the check which fails it. The two are now separate columns in the
+footer, and each INCOMPLETE piece names the check that did not run and how much
+of the piece went unmeasured. --strict refuses them.
+
 WHAT THIS TOOL MAY OVERWRITE
 ----------------------------
 Only footprints it produced itself. A footprint is ITS OWN when the journal
@@ -626,6 +636,11 @@ WHICH TONE EACH INK BECOMES -- 'mask' AND 'tones'
                      finish means exactly ONE metal tone, so three golds really
                      do become one T2 -- but that loses a distinction the
                      artwork has, so it has to be named.
+        erase_ok     the merge does not just lose a tint, it ERASES a feature:
+                     a region drawn only in this colour and wholly enclosed by
+                     the colour it merges into (satoshi_points' chest S,
+                     issue #17). merge_ok alone is refused there, because
+                     "share a tone" does not say "and the feature disappears".
         off_palette  the colour is 55+ weighted-Lab units from the tone. That
                      is a substitution, not an approximation: the Reckless red
                      renders as gold under every assignment there is.
@@ -761,7 +776,8 @@ def _norm_settings(where: str, data: dict, path: Path) -> dict:
     return out
 
 
-_INK_KEYS = {"rgb", "tone", "merge_ok", "off_palette", "legibility", "note"}
+_INK_KEYS = {"rgb", "tone", "merge_ok", "off_palette", "erase_ok",
+             "legibility", "note"}
 
 
 def _norm_tones(v, where: str) -> list[dict]:
@@ -810,8 +826,8 @@ def _norm_tones(v, where: str) -> list[dict]:
                                    f"colours")
             row["merge_ok"] = [tone_map.rgb_to_hex(tone_map._hex_to_rgb(x))
                                for x in m]
-        for k, ty in (("off_palette", bool), ("legibility", str),
-                      ("note", str)):
+        for k, ty in (("off_palette", bool), ("erase_ok", bool),
+                      ("legibility", str), ("note", str)):
             if k in r:
                 if not isinstance(r[k], ty):
                     raise SidecarError(f"{at}: '{k}' must be "
@@ -1604,7 +1620,7 @@ def _propose_tones(a, sources: list[Path], mask: str) -> int:
         w(f"# soft-edge pixels {cen['soft_pixel_fraction']:.3f} of ink; "
           f"{int(ink.sum()):,} opaque px\n")
         w("tones = [\n")
-        seen_tone: dict[str, list] = {}
+        rows = []
         for c in cen["clusters"]:
             share = 100.0 * c["area_fraction"]
             if share < PROPOSE_MIN_SHARE_PCT:
@@ -1616,6 +1632,63 @@ def _propose_tones(a, sources: list[Path], mask: str) -> int:
                 for t in palette.TONE_IDS}
             near_any = min(d, key=d.get)
             pick = min(legible, key=d.get) if legible else near_any
+            rows.append({"hex": c["hex"], "rgb": crgb, "share": share,
+                         "d": d, "near_any": near_any, "pick": pick})
+
+        # A proposal must not OFFER a merge that erases a feature (issue
+        # #17): where a colour about to share a tone forms regions wholly
+        # enclosed by its merge partner, this table as printed would paint
+        # them invisibly -- satoshi_points' chest S, drawn only in the
+        # shading gold. So the shared-tone picks are PROBED with the real
+        # resolver before printing, and an erased colour is moved to the
+        # nearest legible tone nobody else picked. Only when no tone is free
+        # does the merge get offered, and then it is a finding.
+        moved: dict[str, dict] = {}      # hex -> {"tone", "erasure"}
+        hopeless: dict[str, dict] = {}   # hex -> erasure census row
+        for _ in range(4):
+            picks = {r["hex"]: moved.get(r["hex"], {}).get("tone", r["pick"])
+                     for r in rows}
+            if len(set(picks.values())) == len(picks):
+                break
+            first_of, probe_rows = {}, []
+            for r in rows:
+                t = picks[r["hex"]]
+                pr = {"rgb": r["hex"], "tone": t}
+                if t in first_of:
+                    pr["merge_ok"] = [first_of[t]]
+                else:
+                    first_of[t] = r["hex"]
+                probe_rows.append(pr)
+            try:
+                tmap_probe = tone_map.ToneMap.from_dict(
+                    {"mask": pal.mask, "tones": probe_rows,
+                     "source": src.name})
+                _lbl, _op, st = tone_map.map_labels(img, tmap_probe, pal)
+            except tone_map.ToneMapError:
+                # e.g. two census clusters rounding to one hex: the probe
+                # cannot run, and a proposal is still better than a crash.
+                break
+            erased = [e for e in st["merge_erasure"]
+                      if e["erased_pct"] >= tone_map.MERGE_ERASED_FAIL_PCT
+                      and e["hex"] not in hopeless and e["hex"] not in moved]
+            if not erased:
+                break
+            e = max(erased, key=lambda x: x["erased_pct"])
+            r = next(r for r in rows if r["hex"] == e["hex"])
+            used = set(picks.values())
+            alts = [t for t in legible if t not in used]
+            if alts:
+                moved[e["hex"]] = {"tone": min(alts, key=lambda t: r["d"][t]),
+                                   "erasure": e}
+            else:
+                hopeless[e["hex"]] = e
+
+        seen_tone: dict[str, list] = {}
+        for r in rows:
+            crgb, share, d = r["rgb"], r["share"], r["d"]
+            near_any = r["near_any"]
+            pick = moved.get(r["hex"], {}).get("tone", r["pick"])
+            c = {"hex": r["hex"]}
             extra = []
             if not pal[near_any].emits:
                 findings += 1
@@ -1637,6 +1710,25 @@ def _propose_tones(a, sources: list[Path], mask: str) -> int:
                   f"(emit_art.HALFTONE_MIN_DELTA_L).\n")
                 if abs(pal.dl_to_board(pick)) < palette.LEGIBLE_MIN_DL:
                     extra.append('legibility = "declared"')
+            if r["hex"] in moved:
+                e = moved[r["hex"]]["erasure"]
+                w(f"  # moved OFF {r['pick']} (nearest legible, "
+                  f"{d[r['pick']]:.0f} units): merged there, "
+                  f"{e['erased_pct']:.3f}% of the ink -- {e['erased_px']:,} px "
+                  f"of features drawn ONLY in\n"
+                  f"  #    this colour and wholly enclosed by "
+                  f"{', '.join(e['merged_into'])} -- would be painted "
+                  f"invisibly. {pick} keeps them a different tone.\n")
+            if r["hex"] in hopeless:
+                e = hopeless[r["hex"]]
+                findings += 1
+                w(f"  # !! {c['hex']} merged into "
+                  f"{', '.join(e['merged_into'])} ERASES "
+                  f"{e['erased_pct']:.3f}% of the ink ({e['erased_px']:,} px "
+                  f"wholly enclosed by its merge partner) and no legible "
+                  f"tone is free\n"
+                  f"  #    to move it to. Rearrange the bindings, or set "
+                  f"erase_ok = true if losing the feature is the intent.\n")
             prev = seen_tone.setdefault(pick, [])
             merge = ""
             if prev:
@@ -2420,7 +2512,8 @@ def _say_interrupted(exc: BaseException, installed: list[str], lib: Path,
 
 
 VERDICT_ORDER = (verify_art.PASS, verify_art.WARN, verify_art.FAIL,
-                 verify_art.SKIP, "NOT VERIFIED", "NOT REACHED")
+                 verify_art.INCOMPLETE, verify_art.SKIP,
+                 "NOT VERIFIED", "NOT REACHED")
 
 
 def _verdict_counts(results: list[Result]) -> dict:
@@ -2898,12 +2991,21 @@ def _print_summary(a, record, results, lib, choice, untouched,
           f"rows above. This tool installs them on purpose -- every real "
           f"piece in this corpus warns about something -- so read them, or "
           f"re-run with --strict to refuse them.\n")
-    skipped = sorted(r.piece.name for r in results
-                     if r.verdict == verify_art.SKIP and r.ok)
-    if skipped:
-        w(f"  {len(skipped)} piece(s) verified SKIP and were INSTALLED: "
-          f"{', '.join(skipped)}. A SKIP is not a pass -- a check did not "
-          f"run.\n")
+    # INCOMPLETE, not SKIP. verify_art used to fold "a check did not run" into
+    # WARN when it computed a file's verdict, so the SKIP branch here could
+    # never fire and this tool had no way to see the difference between a
+    # measured risk and an unmeasured part. It now returns INCOMPLETE, with the
+    # list of what did not run and how much of the piece that was attached to
+    # the checks -- which the loop in _verify() already surfaces as warnings.
+    incomplete = sorted(r.piece.name for r in results
+                        if r.verdict in (verify_art.INCOMPLETE,
+                                         verify_art.SKIP) and r.ok)
+    if incomplete:
+        w(f"  {len(incomplete)} piece(s) verified INCOMPLETE and were "
+          f"INSTALLED: {', '.join(incomplete)}. INCOMPLETE is not a pass and "
+          f"is not a WARN: a check DID NOT RUN, so nothing measured what that "
+          f"check exists to catch. The NOT MEASURED / NOT TESTED lines on the "
+          f"rows above say which, and what went unmeasured.\n")
     if s["failed_but_written"]:
         w(f"  {s['failed_but_written']} of those failures were INSTALLED "
           f"ANYWAY by --on-fail write. The exit code is still 1.\n")
