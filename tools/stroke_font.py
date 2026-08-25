@@ -1136,7 +1136,7 @@ def _cal_fp(name: str, s: str) -> str:
             f'(type solid)) (layer "F.Cu"))\n'
             f'\t(fp_line (start {r} {r}) (end {r} {r+10}) (stroke (width 0.01) '
             f'(type solid)) (layer "F.Cu"))\n'
-            f'\t(fp_text user "{esc}" (at 0 0) (layer "F.Cu")\n'
+            f'\t(fp_text user "{esc}" (at 0 0) (unlocked yes) (layer "F.Cu")\n'
             f'\t\t(effects (font (size {CAL_H} {CAL_H}) (thickness {CAL_T})) '
             f'(justify left)))\n)\n')
 
