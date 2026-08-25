@@ -767,7 +767,11 @@ class TestVerificationGate:
         lib = lib_of(tmp_path)
         assert run(art / "silk_bar.png", "-o", lib, "--size", 10) == 0
         p = journal(lib)["pieces"][0]
-        assert p["verify"] in ("PASS", "WARN")
+        # INCOMPLETE joined this set when verify_art stopped folding "a check
+        # did not run" into WARN. A single silk bar forms no pairs on any
+        # layer, so the spacing floor is genuinely never applied to it -- which
+        # is a coverage hole, not a finding, and not a FAIL either.
+        assert p["verify"] in ("PASS", "WARN", "INCOMPLETE"), p["verify"]
         keys = {c["key"] for c in p["checks"]}
         assert "kicad-load" in keys
         load = [c for c in p["checks"] if c["key"] == "kicad-load"][0]
