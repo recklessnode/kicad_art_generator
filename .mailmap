@@ -1,0 +1,6 @@
+# One canonical identity for commits made under any of the local variants.
+# Rewrites nothing: git log, shortlog and blame simply stop showing one person
+# as four, whichever identity was configured when a commit was made.
+Reckless Apotheosis <ronald@reckless.systems> <125509978+recklessnode@users.noreply.github.com>
+Reckless Apotheosis <ronald@reckless.systems> <ronald@bynoe.us>
+Reckless Apotheosis <ronald@reckless.systems> Ronald <ronald@reckless.systems>
