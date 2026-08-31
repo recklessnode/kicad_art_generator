@@ -174,9 +174,22 @@ LIBRARY = [
     # The replacement, and the reason tools/render_math.py exists. Same maths,
     # re-rendered from the expression in STIX Sans: a uniform-stroke face has
     # no hairline to lose, so the narrowest ink is 0.137 mm at 72 mm against
-    # the serif's 0.078, and the whole graphic clears at 79 mm rather than 138.
-    # 80 mm is that minimum with a little air. Verified on a board: no sub-floor
-    # ink, and the narrowest gap is 0.300 mm against the 0.150 mm floor.
+    # the serif's 0.078.
+    #
+    # TWO things were changed, and the second matters more than the first.
+    # The face took the stacked form from 138 mm to 79 mm. FLATTENING then
+    # took it to 72 mm and, more usefully, from 20.9 mm tall to 16.6 -- the
+    # inner 50x10^8 / 2^i is written inline instead of as a fraction inside a
+    # fraction. Nesting is what drives the minimum size: each level shrinks
+    # the script one step further, and the floor is set by the SMALLEST glyph
+    # on the layer, not the average one. Removing one level lifts the whole
+    # graphic off the floor. Measured at 72 mm: stacked 0.137, flat clears
+    # outright; at 68 mm flat is 0.1448 and does not, so 72 is the minimum
+    # and not a round number chosen for looks.
+    #
+    # Going FURTHER is worse, which is why the fully-inline form is not here:
+    # with the outer division inline too, the sum's limits carry the floor
+    # alone and it needs 110 mm.
     #
     # Silk-only is deliberate. JLCPCB publishes the same 0.15 mm silk floor on
     # all three of their profiles, so this one size is correct on the cheap
@@ -184,7 +197,7 @@ LIBRARY = [
     # ~47 mm but binds against a minimum mask OPENING, which JLCPCB does not
     # publish -- fab_profiles.py carries a mask DAM figure, which is a
     # different quantity. Unpublished is not the same as met.
-    ("btc_emission_sans", "bitcoin_emission_formula_sans.svg", [80],
+    ("btc_emission_sans", "bitcoin_emission_formula_sans.svg", [72],
      ["--ink-tone", "T1"]),
 ]
 
