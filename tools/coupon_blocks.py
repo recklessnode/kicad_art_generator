@@ -17,9 +17,10 @@ import math
 import pathlib
 
 from coupon_ladders import (
-    BOX_MARGIN, FLOOR_COPPER, FLOOR_MASK_DAM, FLOOR_SILK, LABEL_H, LABEL_PEN,
+    BLOCK_LABEL_H, BOX_MARGIN, FACE_DISPLAY, FACE_NUM, FACE_PROSE,
+    FLOOR_COPPER, FLOOR_MASK_DAM, FLOOR_SILK, LABEL_H,
     SWEEP_BAND_SLACK, SWEEP_MIN,
-    Fp, block_label, report_floors, solved_cap, write_footprint,
+    Fp, report_floors, write_footprint,
 )
 
 # T5 is the background and is drawn as NOTHING. It still gets a labelled square
@@ -57,23 +58,34 @@ def tone_label(name: str) -> str:
 
 def tone_patches(fp, x0, y0, size=8.0, gap=3.0):
     """8 mm patches — big enough to sample well inside the edge (issue #1)."""
-    block_label(fp, "TONE PATCHES 8mm - sample well inside the edge", x0, y0 - 1.6)
-    # One cap for the whole row, solved for the WORST of the seven names, so
-    # the legend reads as one row of type rather than seven sizes.
-    cap = max(solved_cap(tone_label(n), "F.SilkS", LABEL_PEN,
-                         minimum=LABEL_H)[0] for n in TONE_RECIPE)
-    # At that cap the longest name is wider than the patch pitch, so the names
-    # go on two staggered rows. The row pitch is the ink height plus a floor's
-    # clearance -- the em box is exactly 1.0 em tall, so ink height is cap plus
-    # the pen.
-    row_pitch = cap + LABEL_PEN + FLOOR_SILK + 0.1
-    # The first row must clear the T5 outline, which is drawn AT the silk floor
-    # along y0 + size. A 1.4 mm cap reaches 0.8 mm above its own anchor, and at
-    # the old +0.9 mm that put the label's ascenders 0.014 mm from the outline
-    # -- a sub-floor gap introduced by fixing a sub-floor gap. Placed off the
-    # measured ink box instead of off a guess.
-    ink = Fp.text_box("Tg", 0.0, 0.0, cap, LABEL_PEN)
-    row0 = y0 + size + FLOOR_SILK / 2.0 + FLOOR_SILK * (1.0 + 0.05) - ink[1]
+    # Names in UBUNTU (general text; Orbitron is ruled out by measurement:
+    # its T+7 pair leaves 0.046 mm of inter-glyph gap at a 1.5 mm cap, so
+    # 'T7 mask buried' in Orbitron cannot clear the silk floor under a 5 mm
+    # cap).  One cap for the whole row, solved for the WORST of the seven
+    # names, so the legend reads as one row of type rather than seven sizes.
+    names = [tone_label(n) for n in TONE_RECIPE]
+    cap = max(Fp.face_box(nl, FACE_PROSE, minimum=LABEL_H)[0]
+              for nl in names)
+    boxes = [Fp.face_box(nl, FACE_PROSE, minimum=LABEL_H, cap=cap)
+             for nl in names]
+    # Stagger puts even-index names on row 0 and odd on row 1; by content
+    # that gives row 0 no descenders and row 1 the 'enig' g, so each row's
+    # height is measured off its own names rather than assumed.
+    row_h = [0.0, 0.0]
+    for i, (_c, _w, h) in enumerate(boxes):
+        row_h[i % 2] = max(row_h[i % 2], h)
+
+    cwhat = "TONE PATCHES 8mm - sample well inside the edge"
+    _cc, _cw, chh = Fp.face_box(cwhat, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    fp.label_face(cwhat, x0, y0 - 0.5 - chh / 2.0, FACE_PROSE,
+                  minimum=BLOCK_LABEL_H)
+
+    # The first row must clear the T5 outline, which is drawn AT the silk
+    # floor along y0 + size; rows are placed off the measured ink boxes and
+    # TOP-ALIGNED (all names start with a capital T, so their ascents agree
+    # and the baselines stay level to within the ascender differences).
+    row_top = [y0 + size + FLOOR_SILK / 2.0 + FLOOR_SILK * (1.0 + 0.05), 0.0]
+    row_top[1] = row_top[0] + row_h[0] + FLOOR_SILK + 0.05
     x = x0
     for i, (name, layers) in enumerate(TONE_RECIPE.items()):
         for layer in layers:
@@ -85,10 +97,11 @@ def tone_patches(fp, x0, y0, size=8.0, gap=3.0):
             for a, b in (((x, y0), (x + size, y0)), ((x + size, y0), (x + size, y0 + size)),
                          ((x + size, y0 + size), (x, y0 + size)), ((x, y0 + size), (x, y0))):
                 fp.line(a[0], a[1], b[0], b[1], FLOOR_SILK, "F.SilkS")
-        fp.text(tone_label(name), x, row0 + (i % 2) * row_pitch,
-                cap, "F.SilkS", thickness=LABEL_PEN)
+        _c, _w, h = boxes[i]
+        fp.label_face(tone_label(name), x, row_top[i % 2] + h / 2.0,
+                      FACE_PROSE, minimum=LABEL_H, cap=cap)
         x += size + gap
-    return row0 + row_pitch + ink[3] + 1.2
+    return row_top[1] + row_h[1] + 1.2
 
 
 def buried_wedge(fp, x0, y0, length=24.0, w0=3.0, w1=0.2, over_mask=True):
@@ -99,11 +112,17 @@ def buried_wedge(fp, x0, y0, length=24.0, w0=3.0, w1=0.2, over_mask=True):
     a go/no-go at named widths.
     """
     tag = "T7 under mask" if over_mask else "T4 under opening"
-    # -2.6, not -1.6: at -1.6 the caption lands where the T4 variant opens
-    # F.Mask over the wedge and KiCad DRC reports 22 silk_over_copper. The
-    # coupon-local copy in the board repo has carried this by hand since the
-    # first build; it belongs here.
-    block_label(fp, f"BURIED WEDGE {tag} 3.0-0.2mm", x0, y0 - 2.6)
+    # The caption's ink bottom clears the wedge top by 0.3 mm -- and for the
+    # T4 variant, the F.Mask opening that reaches 0.2 mm past the wedge:
+    # silk over an opening is stripped by the fab (KiCad DRC:
+    # silk_over_copper; 22 of them when the old fixed -1.6 anchor was used).
+    # Positioned off the measured ink box, since an outline face's ink height
+    # is not a function of its cap alone.
+    cwhat = f"BURIED WEDGE {tag} 3.0-0.2mm"
+    _c, _w, ch = Fp.face_box(cwhat, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    over = 0.0 if over_mask else 0.2
+    fp.label_face(cwhat, x0, y0 - w0 / 2.0 - over - 0.3 - ch / 2.0,
+                  FACE_PROSE, minimum=BLOCK_LABEL_H)
     steps = 48
     for i in range(steps):
         t0, t1 = i / steps, (i + 1) / steps
@@ -123,8 +142,17 @@ def windows(fp, x0, y0):
     marks the keepout outline on Dwgs.User for a rule area to be drawn on the
     board. Safer, and the board owner is drawing the board anyway.
     """
-    block_label(fp, "T8 WINDOWS - draw Cu keepouts on the board, outline on Dwgs.User",
-                x0, y0 - 1.6)
+    # 'rule areas', not 'keepouts': same KiCad concept (the dialog's own
+    # name), and Ubuntu's k-junction is the thin spot that drives any
+    # k-bearing string to a 2.11 mm cap and this caption to 74 mm of ink.
+    head = "T8 WINDOWS"
+    sub = "draw Cu rule areas on the board, outline on Dwgs.User"
+    _cs, _ws, hs = Fp.face_box(sub, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    _ch, _wh, hh = Fp.face_box(head, FACE_DISPLAY, minimum=BLOCK_LABEL_H)
+    y_sub = y0 - 0.6 - hs / 2.0
+    fp.label_face(head, x0, y_sub - hs / 2.0 - 0.4 - hh / 2.0, FACE_DISPLAY,
+                  minimum=BLOCK_LABEL_H)
+    fp.label_face(sub, x0, y_sub, FACE_PROSE, minimum=BLOCK_LABEL_H)
     x = x0
     for s in (2.0, 4.0, 8.0, 16.0):
         fp.rect(x, y0, s, s, "F.Mask")
@@ -134,21 +162,25 @@ def windows(fp, x0, y0):
         for a, b in (((x, y0), (x + s, y0)), ((x + s, y0), (x + s, y0 + s)),
                      ((x + s, y0 + s), (x, y0 + s)), ((x, y0 + s), (x, y0))):
             fp.line(a[0], a[1], b[0], b[1], 0.12, "Dwgs.User")
-        fp.label(f"{s:.0f}mm", x, y0 + s + 0.9)
+        _c, _w, lh = Fp.face_box(f"{s:.0f}mm", FACE_NUM)
+        fp.label_face(f"{s:.0f}mm", x, y0 + s + 0.3 + lh / 2.0, FACE_NUM)
         x += s + 3.0
 
     # The pair sweep is the important one: it measures BLEED, which sets the
     # minimum spacing between windows and decides whether T8 renders a shape or
     # only a blob.
     y = y0 + 20.0
-    fp.label("BLEED PAIRS - gap 1/2/3/5mm", x0, y - 1.2)
+    bwhat = "BLEED PAIRS - gap 1/2/3/5mm"
+    _cb, _wb, hb = Fp.face_box(bwhat, FACE_PROSE)
+    fp.label_face(bwhat, x0, y - 0.4 - hb / 2.0, FACE_PROSE)
     x = x0
     for g in (1.0, 2.0, 3.0, 5.0):
         for k in (0, 1):
             xx = x + k * (4.0 + g)
             fp.rect(xx, y, 4.0, 4.0, "F.Mask")
             fp.rect(xx, y, 4.0, 4.0, "B.Mask")
-        fp.label(f"{g:.0f}", x, y + 5.0)
+        _c, _w, lh = Fp.face_box(f"{g:.0f}", FACE_NUM)
+        fp.label_face(f"{g:.0f}", x, y + 4.0 + 0.4 + lh / 2.0, FACE_NUM)
         x += 8.0 + g + 3.0
     return y + 8.0
 
@@ -169,7 +201,13 @@ def _rounded_rect_pts(x, y, s, r, seg=8):
 def cutouts(fp, x0, y0):
     """T9 on Edge.Cuts. Sharp vs r0.5 vs r1.0 shows what the router actually
     does to an inside corner it cannot cut."""
-    block_label(fp, "T9 CUTOUTS sharp / r0.5 / r1.0 + slots 1.0 / 0.8", x0, y0 - 1.6)
+    # Ubuntu, not Orbitron, despite the display role: Orbitron's periods
+    # vanish whole at label caps and its tight pairs push the solve to an
+    # 8 mm cap for this string; Ubuntu sets it clean.
+    cwhat = "T9 CUTOUTS sharp / r0.5 / r1.0 + slots 1.0 / 0.8"
+    _cc, _cw, chh = Fp.face_box(cwhat, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    fp.label_face(cwhat, x0, y0 - 0.4 - chh / 2.0, FACE_PROSE,
+                  minimum=BLOCK_LABEL_H)
     # On Edge.Cuts the fabricated feature is the routed slot width, not the
     # stroke, so no stroke floor applies; 0.1 mm is a drawing weight.
     x = x0
@@ -177,13 +215,15 @@ def cutouts(fp, x0, y0):
         pts = _rounded_rect_pts(x, y0, 6.0, r)
         for i in range(len(pts) - 1):
             fp.line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], 0.1, "Edge.Cuts")
-        fp.label(f"r{r:.1f}", x, y0 + 6.9)
+        _c, _w, lh = Fp.face_box(f"r{r:.1f}", FACE_NUM)
+        fp.label_face(f"r{r:.1f}", x, y0 + 6.4 + lh / 2.0, FACE_NUM)
         x += 10.0
     for w in (1.0, 0.8):
         pts = [(x, y0), (x + 8.0, y0), (x + 8.0, y0 + w), (x, y0 + w), (x, y0)]
         for i in range(len(pts) - 1):
             fp.line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], 0.1, "Edge.Cuts")
-        fp.label(f"slot{w:.1f}", x, y0 + w + 1.2)
+        _c, _w2, lh = Fp.face_box(f"slot{w:.1f}", FACE_NUM)
+        fp.label_face(f"slot{w:.1f}", x, y0 + w + 0.7 + lh / 2.0, FACE_NUM)
         x += 11.0
     return y0 + 10.0
 
@@ -191,12 +231,21 @@ def cutouts(fp, x0, y0):
 def registration(fp, x0, y0):
     """Mask openings offset from their copper. Measures the fab's real
     registration rather than its published tolerance."""
-    block_label(fp, "REGISTRATION - mask offset 0 / .05 / .10 / .15mm", x0, y0 - 1.6)
+    # 'opening offset', not 'mask offset': the same fact ('mask' is the word
+    # ON the patch row above), and Ubuntu's k-junction drives any k-bearing
+    # string to a 2.11 mm cap -- this caption is the lowest ink of cal_tones,
+    # and 0.65 mm of its height is what kept cal_minfeature_copper from
+    # fitting below it on the beta card.
+    cwhat = "REGISTRATION - opening offset 0 / .05 / .10 / .15mm"
+    _cc, _cw, chh = Fp.face_box(cwhat, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    fp.label_face(cwhat, x0, y0 - 0.4 - chh / 2.0, FACE_PROSE,
+                  minimum=BLOCK_LABEL_H)
     x = x0
     for off in (0.0, 0.05, 0.10, 0.15):
         fp.rect(x, y0, 4.0, 4.0, "F.Cu")
         fp.rect(x + off, y0 + off, 4.0, 4.0, "F.Mask")
-        fp.label(f"{off:.2f}", x, y0 + 4.9)
+        _c, _w, lh = Fp.face_box(f"{off:.2f}", FACE_NUM)
+        fp.label_face(f"{off:.2f}", x, y0 + 4.3 + lh / 2.0, FACE_NUM)
         x += 7.0
     return y0 + 7.0
 
@@ -228,10 +277,16 @@ def shading_fields(fp, x0, y0, block=10.0):
     openings — silk over an opening is stripped by the fab.
     """
     # Vertical stack above the field, laid out with >= 0.4 mm between silk
-    # items: block label (h 1.2) / crossing label (h 0.9) / tick / field.
-    # A coupon that polices the silk floor cannot crowd its own annotation
-    # under it.
-    block_label(fp, "STIPPLE (Cu+mask) + HATCH (silk), duty 10-90%", x0, y0 - 3.35)
+    # items: block label / crossing label / tick / field, every position off
+    # the measured ink boxes.  A coupon that polices the silk floor cannot
+    # crowd its own annotation under it.
+    cwhat = "STIPPLE (Cu+mask) + HATCH (silk), duty 10-90%"
+    tkwhat = "<%.2f" % FLOOR_MASK_DAM
+    _ct, _wt, ht = Fp.face_box(tkwhat, FACE_NUM)
+    _cc, _cw, chh = Fp.face_box(cwhat, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    y_tk = y0 - 1.05 - 0.25 - ht / 2.0        # tick line spans y0-1.05..-0.30
+    fp.label_face(cwhat, x0, y_tk - ht / 2.0 - 0.4 - chh / 2.0, FACE_PROSE,
+                  minimum=BLOCK_LABEL_H)
 
     # --- stipple: copper squares under matching mask openings (T2) ----------
     pitch, n = 0.5, int(block / 0.5)
@@ -269,7 +324,7 @@ def shading_fields(fp, x0, y0, block=10.0):
     if j_dam < n:
         xc = x0 + j_dam * pitch
         fp.line(xc, y0 - 1.05, xc, y0 - 0.30, FLOOR_SILK, "F.SilkS")
-        fp.label(f"<{FLOOR_MASK_DAM:.2f}", xc, y0 - 1.90)
+        fp.label_face(tkwhat, xc, y_tk, FACE_NUM)
 
     # --- hatch: silk line-width ramp ----------------------------------------
     x2, hp = x0 + block + 4.0, 0.4
@@ -307,20 +362,24 @@ def shading_fields(fp, x0, y0, block=10.0):
             continue
         yy = y0 + ii * hp
         fp.line(xr, yy, xr + 1.0, yy, FLOOR_SILK, "F.SilkS")
-        fp.label(tag, xr + 1.3, yy)
+        fp.label_face(tag, xr + 1.3, yy, FACE_NUM)
 
     # Captions STACKED, not placed under their own block. At 0.9 mm the stipple
     # caption is ~40 mm of text over a 10 mm field, so side-by-side captions
     # collide -- confirmed by rendering, which is the only way to catch it.
-    fp.label(f"stipple Cu+mask {pitch:.1f}mm - dam "
-             f"{pitch - 2 * r_of(duty_of(0)):.2f} to "
-             f"{pitch - 2 * r_of(duty_of(n - 1)):.3f}mm, tick at "
-             f"{FLOOR_MASK_DAM:.2f} dam floor",
-             x0, y0 + block + 0.9)
-    fp.label(f"hatch silk {hp:.1f}mm - stroke {w_of(0):.2f} to {w_of(m - 1):.2f}mm, "
-             f"ticks at {FLOOR_SILK:.2f} silk floor",
-             x0, y0 + block + 2.2)
-    return y0 + block + 4.0
+    cap1 = (f"stipple Cu+mask {pitch:.1f}mm - dam "
+            f"{pitch - 2 * r_of(duty_of(0)):.2f} to "
+            f"{pitch - 2 * r_of(duty_of(n - 1)):.3f}mm, tick at "
+            f"{FLOOR_MASK_DAM:.2f} dam floor")
+    cap2 = (f"hatch silk {hp:.1f}mm - stroke {w_of(0):.2f} to "
+            f"{w_of(m - 1):.2f}mm, ticks at {FLOOR_SILK:.2f} silk floor")
+    _c1, _w1, h1 = Fp.face_box(cap1, FACE_PROSE)
+    _c2, _w2, h2 = Fp.face_box(cap2, FACE_PROSE)
+    yc1 = y0 + block + 0.4 + h1 / 2.0
+    yc2 = yc1 + h1 / 2.0 + 0.4 + h2 / 2.0
+    fp.label_face(cap1, x0, yc1, FACE_PROSE)
+    fp.label_face(cap2, x0, yc2, FACE_PROSE)
+    return yc2 + h2 / 2.0 + 1.0
 
 
 def main():
