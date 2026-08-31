@@ -154,14 +154,38 @@ LIBRARY = [
     ("mfb_lockup_3tone", "mfb_lockup_3tone.png",       [20, 30],
      ["--min-area-mm2", "auto", "--descr", MFB_3TONE_DESCR]),
     ("bitcoin_b",      "bitcoin_b.svg",                [10, 16], []),
-    # 72/90 mm, up from 25/35. This one is not a gap problem, it is the stroke
-    # weight of the formula itself: the narrowest F.SilkS feature scales dead
-    # linearly at 0.002105 mm per mm of width, so it reaches the 0.15 mm silk
-    # floor only at 72 mm. Bisected: 70 mm gives 0.1475, 71 mm 0.1496, 72 mm
-    # clears. 72 x 22.9 mm and 90 x 28.6 mm both fit the Satoshi Starter
-    # outline, which measures 152.4 x 101.6 mm, so this stays in the library
-    # -- as a back-of-board banner rather than the 25 mm badge it once was.
+    # THE 72 mm FIGURE BELOW WAS WRONG, AND WRONG IN THE DANGEROUS DIRECTION.
+    #
+    # It read "the narrowest F.SilkS feature scales dead linearly at 0.002105
+    # mm per mm of width, so it reaches the 0.15 mm silk floor only at 72 mm.
+    # Bisected: 70 mm gives 0.1475, 71 mm 0.1496, 72 mm clears." Every number
+    # in that sentence came from the FOOTPRINT-level min-feature check, which
+    # is a rotating caliper on the CONVEX HULL -- exact for a convex outline
+    # and an over-estimate for a concave one. Glyphs are concave. Placed on a
+    # board and measured by the ink-floor check, which takes the inscribed
+    # width of the region and is the exact one, the same art at 72 mm is
+    # 0.078192 mm at 8 sites: less than HALF the floor. The true rate is
+    # 0.001086 mm/mm, so this art needs 138 mm to clear in silk.
+    #
+    # So btc_emission_72mm and _90mm SHIP SUB-FLOOR SILK. They are kept only
+    # so the defect stays reproducible; nothing should place them.
     ("btc_emission",   "bitcoin_emission_formula.svg", [72, 90], ["--ink-tone", "T1"]),
+
+    # The replacement, and the reason tools/render_math.py exists. Same maths,
+    # re-rendered from the expression in STIX Sans: a uniform-stroke face has
+    # no hairline to lose, so the narrowest ink is 0.137 mm at 72 mm against
+    # the serif's 0.078, and the whole graphic clears at 79 mm rather than 138.
+    # 80 mm is that minimum with a little air. Verified on a board: no sub-floor
+    # ink, and the narrowest gap is 0.300 mm against the 0.150 mm floor.
+    #
+    # Silk-only is deliberate. JLCPCB publishes the same 0.15 mm silk floor on
+    # all three of their profiles, so this one size is correct on the cheap
+    # process as well as the fine one. The ENIG alternative clears copper at
+    # ~47 mm but binds against a minimum mask OPENING, which JLCPCB does not
+    # publish -- fab_profiles.py carries a mask DAM figure, which is a
+    # different quantity. Unpublished is not the same as met.
+    ("btc_emission_sans", "bitcoin_emission_formula_sans.svg", [80],
+     ["--ink-tone", "T1"]),
 ]
 
 # --- hand-authored parts ----------------------------------------------------
