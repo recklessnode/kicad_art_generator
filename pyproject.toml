@@ -48,6 +48,14 @@ dependencies = [
   # a sub-floor letterform always says "NOT MEASURED" is a tree whose board
   # verification does not work.
   "shapely>=2.0",
+  # tools/render_math.py -- mathtext, not a LaTeX install, so rendering an
+  # expression needs no external toolchain. It is a REAL dependency of the
+  # library rather than a convenience: btc_emission_sans is rendered from the
+  # expression rather than from a checked-in export, because the serif export
+  # it replaces measures 0.078 mm of silk ink against a 0.150 mm floor and no
+  # size that fits a board fixes that. Without matplotlib the recipe in
+  # render_library.py cannot be re-run and that entry is unreproducible.
+  "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]
