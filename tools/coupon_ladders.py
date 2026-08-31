@@ -401,6 +401,70 @@ class Fp:
             f'(thickness {t:.4f})) (justify left)))'
         )
 
+    # --- outline (TrueType) faces ------------------------------------------
+    # Labels moved to outline faces on 2026-08-30 (owner's font mapping).  An
+    # outline face has NO PEN: stem, counter and gap are emergent properties
+    # of letterforms this repo does not own, so nothing here can solve them
+    # from stroke metrics.  tools/outline_font.py measures them instead, off
+    # polygons rendered by KiCad itself, and label_face() refuses any cap the
+    # measured ink does not clear the floor at.  text_face() writes no
+    # thickness token on purpose: tools/verify_art.py has no TrueType path
+    # (kicad_art_generator#24) and reports a thickness-less faced string as
+    # NOT MEASURED -- an honest refusal -- where a thickness would make it
+    # measure the string as stroke text and be wrong.
+
+    def text_face(self, s, x, y, size, layer, face):
+        """One faced fp_text.  `size` is the KiCad height field, NOT the cap
+        height -- callers go through label_face(), which solves the cap and
+        converts.  Anchor: pen origin x, vertical centre y (KiCad default)."""
+        self.items.append(
+            f'\t(fp_text user "{s}" (at {x:.4f} {y:.4f}) (unlocked yes) '
+            f'(layer "{layer}")\n'
+            f'\t\t(uuid "{self._uuid()}")\n'
+            f'\t\t(effects (font (face "{face}") '
+            f'(size {size:.4f} {size:.4f})) (justify left)))'
+        )
+
+    def label_face(self, s, x, y, face, *, minimum=LABEL_H, layer="F.SilkS",
+                   cap=None):
+        """A faced label whose every stem, counter and gap clears the floor.
+
+        `x` is the pen origin (ink starts a sidebearing to the right), `y` is
+        the INK VERTICAL CENTRE.  Passing `cap` uses that cap -- for a row
+        that must share one size -- and still REFUSES if the string does not
+        clear the floor at it.  Returns (cap, ink_box) in these coordinates.
+        Venv-only (fontTools/shapely); the floor guard against silent font
+        substitution lives in outline_font (two gates, see its docstring).
+        """
+        import outline_font as OF
+        floor, _cls = floor_for(layer)
+        assert floor is not None, "faced labels only go on floored layers"
+        need, binds = OF.solved_cap_face(face, s, floor, minimum=minimum)
+        if cap is None:
+            cap = need
+        elif cap < need - 1e-9:
+            raise CapTooSmall(
+                f"{self.name}: {s!r} in {face} at cap {cap:.4f} mm does not "
+                f"clear the {floor:.3f} mm floor; needs {need:.4f} mm "
+                f"({binds})")
+        cal = OF.calibration(face)
+        size = cal.size_for_cap(cap)
+        b = OF.run_ink(face, s).box(size)
+        ay = y - (b[1] + b[3]) / 2.0
+        self.text_face(s, x, ay, size, layer, face)
+        return cap, (x + b[0], ay + b[1], x + b[2], ay + b[3])
+
+    @staticmethod
+    def face_box(s, face, *, minimum=LABEL_H, layer="F.SilkS", cap=None):
+        """(cap, ink w, ink h) a label_face() call would produce -- for
+        layout that must be computed BEFORE anything is drawn."""
+        import outline_font as OF
+        floor = floor_for(layer)[0]
+        need, _b = OF.solved_cap_face(face, s, floor, minimum=minimum)
+        cap = need if cap is None else max(cap, need)
+        b = OF.run_ink(face, s).box(OF.calibration(face).size_for_cap(cap))
+        return cap, b[2] - b[0], b[3] - b[1]
+
     def _cap_check(self, s, x, y, height, t, layer, allow_below_floor):
         """A label whose own gaps close at the floor is a defect, and REFUSED.
 
@@ -563,6 +627,17 @@ def block_label(fp, s, x, y):
     return fp.label(s, x, y, minimum=BLOCK_LABEL_H)
 
 
+# --- the outline faces (owner's mapping, 2026-08-30) ------------------------
+# Applied by CONTENT and ROLE, not by call site:
+#   Orbitron      display/headline runs -- plain ASCII and digits only
+#   Ubuntu        general text (prose tails, captions with words)
+#   Ubuntu Mono   metrics and numerics (no Bitcoin sign appears in this file)
+# The Bitcoin-sign faces (Consolas / Segoe UI) live in the marking, not here.
+FACE_DISPLAY = "Orbitron"
+FACE_PROSE = "Ubuntu"
+FACE_NUM = "Ubuntu Mono"
+
+
 # How far a declaration box is opened out past the geometry it fences, mm.
 # Small on purpose: the verifier refuses a box more than 1.25x the bounding
 # box of what it fences, and a generous margin is a land-grab by another name.
@@ -573,29 +648,44 @@ def isolated_features(fp, x0, y0, layer_key):
     """Discrete dots and lines. Finds dropout, which is the failure that matters."""
     layer = LAYERS[layer_key]
     floor = floor_for(layer)[0] or STROKE_ABS_MIN
-    # TWO LINES, because the solved cap made one line 83 mm long. At the 1.2 mm
-    # cap this caption used to be set at, its 'AT' sidebearing gap measured
-    # 0.0486 mm against a 0.150 mm floor and genuinely bridged; solving that
-    # away costs a 1.77 mm cap, and 53 characters at 1.77 mm ran clear across
-    # the beta coupon's spectre patch -- KiCad DRC: "Silkscreen clipped by
-    # solder mask", which means the fab would strip the tail of the sentence
-    # that says the sub-floor rungs are deliberate. Two lines keep it inside
-    # the block's own column.
+
+    # RUNG LABELS: Ubuntu Mono numerics, floor-solved per label (the ladders
+    # have always sized each label alone).  At the solved caps a label is
+    # ~1.7-2.0 mm of ink against the 1.6 mm rung pitch, so ONE column of
+    # per-rung labels cannot clear the silk floor between neighbours.  TWO
+    # columns, alternating rung by rung: same-column neighbours sit 3.2 mm
+    # apart, and the columns are separated horizontally.  The rung pitch --
+    # part of the measurement's isolation -- does not move.
+    pitch, n = 1.6, len(FEATURE_STEPS)
+    labs, colw, lab_h = [], 0.0, 0.0
+    for d in FEATURE_STEPS:
+        cap, w, h = Fp.face_box(f"{d:.3f}", FACE_NUM)
+        labs.append((f"{d:.3f}", cap, w, h))
+        colw, lab_h = max(colw, w), max(lab_h, h)
+    colw += 0.5
+    xr = x0 + 2.0 * colw + 0.5        # rung column origin (was x0 + 5.0)
+
+    # Heads, stacked upward from the topmost label's ink with 0.4 mm clears
+    # -- computed from measured ink boxes, because an outline face's ink
+    # height is not a function of its cap alone.
     head = f"MIN FEATURE / {layer_key.upper()}"
-    cap1, _b = solved_cap(head, "F.SilkS", LABEL_PEN, minimum=BLOCK_LABEL_H)
-    block_label(fp, head, x0,
-                y0 - 1.6 - (cap1 + LABEL_PEN + FLOOR_SILK + 0.1))
-    block_label(fp, f"sweeps under {floor:.2f}mm on purpose", x0, y0 - 1.6)
+    sub = f"sweeps under {floor:.2f}mm on purpose"
+    _c2, _w2, hh2 = Fp.face_box(sub, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    _c1, _w1, hh1 = Fp.face_box(head, FACE_DISPLAY, minimum=BLOCK_LABEL_H)
+    lab_top = y0 + FEATURE_STEPS[0] / 2.0 - lab_h / 2.0
+    y_sub = lab_top - 0.4 - hh2 / 2.0
+    y_head = y_sub - hh2 / 2.0 - 0.4 - hh1 / 2.0
+    fp.label_face(head, x0, y_head, FACE_DISPLAY, minimum=BLOCK_LABEL_H)
+    fp.label_face(sub, x0, y_sub, FACE_PROSE, minimum=BLOCK_LABEL_H)
 
     # THE DECLARATION, FROM THE DESIGN CONSTANTS. FEATURE_STEPS decides the
-    # band; the row pitch, the two column offsets and the widest rung decide
+    # band; the row pitch, the label-column width and the widest rung decide
     # the box. Both are known before a single item is drawn, and neither is
     # read back afterwards -- see the note on SWEEP_REF.
     dmin, dmax = min(FEATURE_STEPS), max(FEATURE_STEPS)
-    pitch, n = 1.6, len(FEATURE_STEPS)
-    box = (x0 + 5.0 - BOX_MARGIN,
+    box = (xr - BOX_MARGIN,
            y0 - BOX_MARGIN,
-           x0 + 11.0 + dmax / 2.0 + BOX_MARGIN,
+           xr + 6.0 + dmax / 2.0 + BOX_MARGIN,
            y0 + pitch * (n - 1) + dmax + BOX_MARGIN)
     lo, hi = dmin - SWEEP_BAND_SLACK, dmax + SWEEP_BAND_SLACK
     # `width` and `vanish` are declared SEPARATELY and neither implies the
@@ -606,15 +696,16 @@ def isolated_features(fp, x0, y0, layer_key):
     fp.declare_sweep("vanish", layer, lo, hi, box, "rungs")
 
     y = y0
-    for d in FEATURE_STEPS:
+    for i, (d, (txt, cap, _w, _h)) in enumerate(zip(FEATURE_STEPS, labs)):
         # The rung label sits LEFT of the box, so a declaration written for
         # copper rungs can never reach the silk that annotates them.
-        fp.label(f"{d:.3f}", x0, y + 0.4)
+        fp.label_face(txt, x0 if i % 2 == 0 else x0 + colw, y + d / 2.0,
+                      FACE_NUM, cap=cap)
         # A dot and a 4 mm line at the same dimension. The bottom rungs are
         # under the floor and are meant to be: the rung that disappears IS the
         # measurement. Declared, so the guard stays quiet about it.
-        fp.rect(x0 + 5.0, y, d, d, layer, allow_below_floor=True)
-        fp.line(x0 + 7.0, y + d / 2, x0 + 11.0, y + d / 2, d, layer,
+        fp.rect(xr, y, d, d, layer, allow_below_floor=True)
+        fp.line(xr + 2.0, y + d / 2, xr + 6.0, y + d / 2, d, layer,
                 allow_below_floor=True)
         y += pitch
     return y
@@ -624,7 +715,17 @@ def converging_pair(fp, x0, y0, layer_key, length=14.0, start_gap=1.0,
                     steps=60):
     """Continuous wedge: read the merge point directly instead of interpolating."""
     layer = LAYERS[layer_key]
-    block_label(fp, f"CONVERGE / {layer_key.upper()} 1.0-0mm", x0, y0 - 1.6)
+    # 'CONVERGE 1.0-0mm', and SHORT on purpose: on the beta coupon
+    # btc_emission_72mm's silk starts at board x = -21.09 in this block's
+    # y-band, and the old 'CONVERGE / COPPER 1.0-0mm' (33 mm of newstroke,
+    # 41.5 mm in Orbitron at the solved cap) ran straight into it.  The layer
+    # is already named by this footprint's own MIN FEATURE head; 'CONVERGE
+    # 1.0-0mm' ends 0.5 mm clear of the emission formula.
+    cwhat = "CONVERGE 1.0-0mm"
+    _cc, _cw, ch = Fp.face_box(cwhat, FACE_DISPLAY, minimum=BLOCK_LABEL_H)
+    fp.label_face(cwhat, x0,
+                  y0 - start_gap / 2.0 - FLOOR_SILK / 2.0 - 0.4 - ch / 2.0,
+                  FACE_DISPLAY, minimum=BLOCK_LABEL_H)
     # The GAP is what is being swept here, so the stroke is held at the silk
     # floor — at or above every layer's floor — to keep the stroke from being
     # the thing that fails first.
@@ -680,12 +781,25 @@ def hatch_ladder(fp, x0, y0, layer_key="silk", block=8.0):
     # The captions are kept CLEAR of the declaration box, not merely on a
     # different layer -- on cal_hatch_silk the ramp and its labels share
     # F.SilkS, and a label that strays inside the box is a label a copper
-    # declaration could not protect but a silk one could.
-    block_label(fp, f"HATCH PITCH / {layer_key.upper()} duty 20-80% - ramp "
-                    f"runs under {floor:.2f}mm", x0, box[1] - 2.4)
+    # declaration could not protect but a silk one could.  The old one-line
+    # caption split at its own separator: the display head goes Orbitron, the
+    # prose tail Ubuntu, and every position stacks up from measured ink boxes
+    # (an outline face's ink height is not a function of its cap alone).
+    plabs = [(f"{p:.1f}",) + Fp.face_box(f"{p:.1f}", FACE_NUM)
+             for p in HATCH_PITCHES]
+    plab_h = max(h for _s, _c, _w, h in plabs)
+    y_plab = box[1] - 0.3 - plab_h / 2.0
+    sub = f"duty 20-80% - ramp runs under {floor:.2f}mm"
+    _cs, _ws, hs = Fp.face_box(sub, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    y_sub = y_plab - plab_h / 2.0 - 0.4 - hs / 2.0
+    head = f"HATCH PITCH / {layer_key.upper()}"
+    _ch, _wh, hh = Fp.face_box(head, FACE_DISPLAY, minimum=BLOCK_LABEL_H)
+    fp.label_face(head, x0, y_sub - hs / 2.0 - 0.4 - hh / 2.0, FACE_DISPLAY,
+                  minimum=BLOCK_LABEL_H)
+    fp.label_face(sub, x0, y_sub, FACE_PROSE, minimum=BLOCK_LABEL_H)
     x = x0
-    for pitch in HATCH_PITCHES:
-        fp.label(f"{pitch:.1f}", x, box[1] - 0.9)
+    for pitch, (ptxt, pcap, _pw, _ph) in zip(HATCH_PITCHES, plabs):
+        fp.label_face(ptxt, x, y_plab, FACE_NUM, cap=pcap)
         n = int(block / pitch)
         for i in range(n):
             yy = y0 + i * pitch
@@ -700,24 +814,44 @@ def hatch_ladder(fp, x0, y0, layer_key="silk", block=8.0):
 
 
 def text_ladder(fp, x0, y0, layer_key, sizes):
+    """THE SPECIMEN STAYS NEWSTROKE. It is a measurand -- the stroke width IS
+    the swept quantity -- and an outline face has no thickness parameter, so
+    only the annotation around it moved to faces."""
     layer = LAYERS[layer_key]
     floor = floor_for(layer)[0] or STROKE_ABS_MIN
-    block_label(fp, f"MICROTEXT / {layer_key.upper()} - stroke sweeps under "
-                    f"{floor:.2f}mm", x0, y0 - 1.6)
+    head = f"MICROTEXT / {layer_key.upper()}"
+    sub = f"stroke sweeps under {floor:.2f}mm"
+    _cs, _ws, hs = Fp.face_box(sub, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    _ch, _wh, hh = Fp.face_box(head, FACE_DISPLAY, minimum=BLOCK_LABEL_H)
+    y_sub = y0 - 0.8 - hs / 2.0
+    fp.label_face(head, x0, y_sub - hs / 2.0 - 0.4 - hh / 2.0, FACE_DISPLAY,
+                  minimum=BLOCK_LABEL_H)
+    fp.label_face(sub, x0, y_sub, FACE_PROSE, minimum=BLOCK_LABEL_H)
+
+    # Faced size labels are ~1.9 mm of ink, so a row pitch of size + 1.2
+    # collides at the small sizes; the pitch takes whichever is larger, and
+    # the SAME row positions feed the declaration box and the drawing.
+    labs = [(f"{h:.1f}",) + Fp.face_box(f"{h:.1f}", FACE_NUM) for h in sizes]
+    rows, y = [], y0
+    for h, (_t, _c, _w, lh) in zip(sizes, labs):
+        rows.append(y)
+        y += max(h + 1.2, lh + 0.4)
+    y_end = y
 
     # The specimen's extent at each size, computed forward from the size list
     # and the string -- the same stroke_font metrics the verifier will measure
-    # it with. Unioned into one box before anything is drawn.
+    # it with. Unioned into one box before anything is drawn.  The specimen
+    # column starts at x0 + 5.2: the faced labels are wider than the stroke
+    # ones were, and the old 4.0 left 0.3 mm of gap.
+    TL_X = x0 + 5.2
     bx0 = by0 = bx1 = by1 = None
-    y = y0
-    for h in sizes:
-        b = Fp.text_box(SPECIMEN, x0 + 4.0, y, h, h * TEXT_STROKE_RATIO)
+    for h, y in zip(sizes, rows):
+        b = Fp.text_box(SPECIMEN, TL_X, y, h, h * TEXT_STROKE_RATIO)
         if b is not None:
             bx0 = b[0] if bx0 is None else min(bx0, b[0])
             by0 = b[1] if by0 is None else min(by0, b[1])
             bx1 = b[2] if bx1 is None else max(bx1, b[2])
             by1 = b[3] if by1 is None else max(by1, b[3])
-        y += h + 1.2
     pens = [h * TEXT_STROKE_RATIO for h in sizes]
     fp.declare_sweep("width", layer, min(pens) - SWEEP_BAND_SLACK,
                      max(pens) + SWEEP_BAND_SLACK,
@@ -730,26 +864,29 @@ def text_ladder(fp, x0, y0, layer_key, sizes):
                       bx1 + BOX_MARGIN, by1 + BOX_MARGIN),
                      "microtext")
 
-    y = y0
-    for h in sizes:
-        fp.label(f"{h:.1f}", x0, y)
+    for h, y, (txt, cap, _w, _lh) in zip(sizes, rows, labs):
+        # The stroke-text anchor is the em-box centre; the faced label is
+        # placed on the same row centre so the two columns read side by side.
+        fp.label_face(txt, x0, y, FACE_NUM, cap=cap)
         # The specimen IS the sweep. Hold the 1:6.7 stroke ratio all the way
         # down, through the floor, and let the coupon report where the glyphs
         # stop resolving. Passed explicitly rather than taking the floor-raised
         # default, which would flatten the bottom of the ladder into a row of
         # identical strokes and destroy the measurement.
-        fp.text(SPECIMEN, x0 + 4.0, y, h, layer,
+        fp.text(SPECIMEN, TL_X, y, h, layer,
                 thickness=h * TEXT_STROKE_RATIO, allow_below_floor=True)
-        y += h + 1.2
-    return y
+    return y_end
 
 
 def scale_bar(fp, x0, y0, length=20.0):
     """Self-calibrating: features can be measured off a photograph."""
-    # The major ticks rise 1.2 mm from the baseline, so the standard -1.6 mm
-    # label position puts the caption straight through them (visible in a
-    # render, invisible in the numbers). Cleared to -2.6.
-    block_label(fp, "SCALE 20mm / 1mm ticks", x0, y0 - 2.6)
+    # Ubuntu, not Orbitron: 'ticks' is lowercase prose (and Orbitron sets the
+    # string 36.8 mm wide against a 20 mm ruler).  Ink stacked clear of the
+    # 1.2 mm major ticks, which the old fixed -1.6 anchor ran through.
+    cwhat = "SCALE 20mm / 1mm ticks"
+    _c, _w, ch = Fp.face_box(cwhat, FACE_PROSE, minimum=BLOCK_LABEL_H)
+    fp.label_face(cwhat, x0, y0 - 1.2 - 0.4 - ch / 2.0, FACE_PROSE,
+                  minimum=BLOCK_LABEL_H)
     # The ruler must survive whatever else on the coupon does not, so it is
     # drawn at the floor, never below it.
     fp.line(x0, y0, x0 + length, y0, FLOOR_SILK, "F.SilkS")
