@@ -131,7 +131,22 @@ _BLACK_TONES = {
     "T7": ("mask + buried", (33, 32, 31)),
 }
 
+# Names carry the BLACK stackup's colour words ("silk white", "black mask"),
+# which are wrong on any other colourway: the white/black palette printed
+# "T1 silk white (30, 30, 32)" and "T5 black mask (240, 240, 238)", and those
+# strings travel into footprints and reports.  _name_for() below substitutes
+# the actual mask and silk colour of the palette being built.
 _NAMES = {tid: v[0] for tid, v in _BLACK_TONES.items()}
+
+
+def _name_for(tid: str, mask: str, silk: str) -> str:
+    """The black table's name with its colour words replaced by this stackup's."""
+    n = _NAMES[tid]
+    if "silk" in n:
+        n = n.replace("white", silk).replace("black", silk)
+    elif "mask" in n:
+        n = n.replace("black", mask).replace("white", mask)
+    return n
 
 PALETTE_TAG_PREFIX = "palette:"
 
@@ -162,6 +177,34 @@ class Violation:
 
     def __str__(self) -> str:
         return f"[{self.kind}] {self.msg}"
+
+
+def _lift(c: int, f: float) -> int:
+    """Copper seen THROUGH the mask, as a lift toward white that cannot clamp.
+
+    This was `_clamp(c * f)`, a straight multiply.  That is fine on a dark
+    mask and structurally broken on a light one: white is (240, 240, 238), so
+    240 * 1.35 = 324 clamps to 255 -- copper under a white mask modelled as
+    BRIGHTER THAN PURE WHITE.  Worse, T6 and T7 both clamped to the same
+    (255, 255, 255), so two tones became one and Palette.nearest() could never
+    return T7 at all; the tie goes to TONE_IDS order.
+
+    The replacement lifts by a fraction of the REMAINING HEADROOM to white,
+    scaled by how much light the mask lets through in the first place:
+
+        c + (255 - c) * (f - 1) * c / 255
+
+    It is not a new physical claim.  It was chosen to REPRODUCE the multiply
+    where the multiply was calibrated -- on black (24) at f = 1.35 it returns
+    32, against the multiply's 32.4 -- while staying monotone and bounded
+    everywhere else.  On white (240) it returns 245 for T6 and 242 for T7:
+    distinct, below pure white, and only a few L* from the board, which is
+    the honest answer.  legible() then excludes them on its own, because that
+    separation is under LEGIBLE_MIN_DL.  These rows stay PROVISIONAL: nobody
+    has sampled copper under a white mask, and this models it rather than
+    measuring it.
+    """
+    return _clamp(c + (255 - c) * (f - 1.0) * c / 255.0)
 
 
 def _clamp(v: float) -> int:
@@ -239,9 +282,23 @@ class Palette:
         return self.lstar("T1") < self.lstar(BACKGROUND_TONE)
 
     # --- interop -----------------------------------------------------------
-    def as_w0_tones(self) -> list[tuple]:
-        """Exactly the shape of w0_spike.TONES: (id, name, rgb, emits)."""
-        return [(t.id, t.name, tuple(t.rgb), t.emits) for t in self.tones]
+    def as_w0_tones(self, *, only: tuple[str, ...] | None = None) -> list[tuple]:
+        """Exactly the shape of w0_spike.TONES: (id, name, rgb, emits).
+
+        `only` restricts the anchor table to those tone ids.  IT MATTERS THAT
+        CALLERS USE IT.  drawable() decides what a run is allowed to put on a
+        board, emit_art prints that set in its header -- and the nearest-anchor
+        quantiser used to receive the FULL table regardless, so it could and
+        did assign ink to tones the same run had just declared undrawable.
+        A render was observed putting 36 mm2 on In1.Cu with neither
+        --allow-inner nor --allow-provisional given, because the only place
+        those flags were enforced was the DECLARED tone-map path
+        (emit_art._check_tone_map).  A rule that is computed, printed, and then
+        not applied to the path that does the work is not a rule.
+        """
+        keep = self.tones if only is None else [t for t in self.tones
+                                                if t.id in set(only)]
+        return [(t.id, t.name, tuple(t.rgb), t.emits) for t in keep]
 
     def tag(self) -> str:
         """The token the emitter writes into a footprint's `tags`.
@@ -414,8 +471,8 @@ def palette_for(mask: str, silk: str | None = None, finish: str = "ENIG",
 
     m = _MASK_RGB[mask]
     t5 = tuple(m)
-    t6 = tuple(_clamp(c * LIFT_T6) for c in m)
-    t7 = tuple(_clamp(c * LIFT_T7) for c in m)
+    t6 = tuple(_lift(c, LIFT_T6) for c in m)
+    t7 = tuple(_lift(c, LIFT_T7) for c in m)
     t3 = _T3_FR4
     t4 = tuple(_clamp((a + b) / 2) for a, b in zip(t3, t7))
     rows = {
