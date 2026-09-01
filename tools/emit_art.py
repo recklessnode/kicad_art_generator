@@ -4322,8 +4322,11 @@ def load_labels(path, args, log, pal=None, tmap=None):
     labels, _opaque, st = quantise(img, smooth=args.smooth, mix=args.mix,
                                    mix_ratio=args.mix_ratio,
                                    mix_split=args.mix_split,
-                                   tones=(pal.as_w0_tones() if pal is not None
-                                          else TONES))
+                                   tones=(pal.as_w0_tones(
+                                              only=pal.drawable(
+                                                  allow_inner=args.allow_inner,
+                                                  allow_provisional=args.allow_provisional))
+                                          if pal is not None else TONES))
     log.append(f"quantise: opaque={st['opaque_px']:,} dropped={st['dropped_px']:,} "
                f"tones={' '.join(st['per_tone'])}")
     m = st.get("mixture", {})
