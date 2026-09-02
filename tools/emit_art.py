@@ -4247,7 +4247,11 @@ def _np_norm(a, b):
     return float(np.linalg.norm(np.asarray(a) - np.asarray(b)))
 
 
-def _tags_for(pal, tmap):
+PALETTE_DIGEST_PREFIX = "palette-digest:"
+COLOURWAY_ANY = "colourway:any"
+
+
+def _tags_for(pal, tmap, pinned=False):
     """The footprint's `tags` string: what this part was assigned against.
 
     Same reasoning as fab_profiles.FAB_TAG_PREFIX (fab_profiles.py lines
@@ -4255,8 +4259,26 @@ def _tags_for(pal, tmap):
     checks against another will happily pass a part that is wrong, and the
     failure surfaces long after the command line that caused it is gone. So the
     part carries the statement and both sides resolve through it.
+
+    THE DIGEST IS THE IDENTITY, NOT THE NAME.  pal.tag() is a human-readable
+    label -- "palette:purple-white-enig" -- and it does not change when the
+    TONE VALUES under that name change.  A revision to LIFT_T6 or _MASK_RGB
+    silently re-quantises every future part while every existing part keeps a
+    tag that still reads correct, which is the exact shape of staleness this
+    tree keeps being bitten by.  So the digest goes on the part as well, and
+    consumers compare THAT.
+
+    `pinned` means --ink-tone was given: every ink was re-pointed to one named
+    tone and the palette never took a decision, so the geometry is identical on
+    every colourway.  Such a part is marked colourway:any and is placeable on
+    any board.  MEASURED: reckless_mono at 35 mm renders md5-identical under
+    purple, white and black.  Do not confuse this with "emits only one tone" --
+    mfb_lockup is T1-only on purple and moves wholesale to F.Mask on white.
     """
-    parts = ["recklessart", "art", pal.tag()]
+    if pinned:
+        return " ".join(["recklessart", "art", COLOURWAY_ANY])
+    parts = ["recklessart", "art", pal.tag(),
+             PALETTE_DIGEST_PREFIX + pal.digest()]
     if tmap is not None:
         parts.append(f"tonemap:{tmap.digest()}")
     return " ".join(parts)
@@ -5007,7 +5029,8 @@ def main(argv=None):
             stipple_pitch_mm=args.stipple_pitch,
             halftone_levels=args.halftone_levels,
             microtext=mt_spec,
-            pal=pal, tags=_tags_for(pal, tmap))
+            pal=pal, tags=_tags_for(pal, tmap,
+                                   pinned=args.ink_tone is not None))
     except RegionOpError as e:
         sys.stderr.write(f"\n!! {e}\n\n")
         return 2
@@ -5067,7 +5090,7 @@ def main(argv=None):
     rep["source"] = str(args.labels)
     if getattr(args, "_rasteriser", None):
         rep["rasteriser"] = args._rasteriser
-    rep["tags"] = _tags_for(pal, tmap)
+    rep["tags"] = _tags_for(pal, tmap, pinned=args.ink_tone is not None)
     if tmap is not None:
         st = getattr(args, "_tonemap_stats", {})
         rep["tone_map"] = {
