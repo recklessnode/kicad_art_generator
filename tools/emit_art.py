@@ -4319,14 +4319,26 @@ def load_labels(path, args, log, pal=None, tmap=None):
                  else list(tone_ids))
         return labels.astype(np.int64), names, img
 
+    # THE LABELS INDEX THE ANCHOR TABLE, SO THE NAMES MUST COME FROM IT TOO.
+    #
+    # quantise() returns np.argmin over the anchors it was handed, so label i
+    # means anchors[i] -- NOT _pal.TONE_IDS[i].  Restricting the anchors to the
+    # drawable set (correct, and the whole point) therefore RENUMBERS them, and
+    # naming the result from the full seven-tone table silently mislabels every
+    # tone after the first gap.  On the default black palette drawable is
+    # (T1, T2, T3, T6): label 3 is T6, the full table's index 3 is T4, and T4's
+    # recipe is F.Mask + In1.Cu -- so a run that asked for no inner layer put
+    # 163,812 px across 41 polygons onto In1.Cu, and verify_art passed the
+    # board because the geometry was self-consistent, just on the wrong layer.
+    anchors = (pal.as_w0_tones(only=pal.drawable(
+                   allow_inner=args.allow_inner,
+                   allow_provisional=args.allow_provisional))
+               if pal is not None else TONES)
+    tone_ids = [t[0] for t in anchors]          # rebind: labels index THIS
     labels, _opaque, st = quantise(img, smooth=args.smooth, mix=args.mix,
                                    mix_ratio=args.mix_ratio,
                                    mix_split=args.mix_split,
-                                   tones=(pal.as_w0_tones(
-                                              only=pal.drawable(
-                                                  allow_inner=args.allow_inner,
-                                                  allow_provisional=args.allow_provisional))
-                                          if pal is not None else TONES))
+                                   tones=anchors)
     log.append(f"quantise: opaque={st['opaque_px']:,} dropped={st['dropped_px']:,} "
                f"tones={' '.join(st['per_tone'])}")
     m = st.get("mixture", {})
