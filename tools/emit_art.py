@@ -4251,6 +4251,33 @@ PALETTE_DIGEST_PREFIX = "palette-digest:"
 COLOURWAY_ANY = "colourway:any"
 
 
+def _is_pinned(args):
+    """True when the PALETTE TOOK NO PART in assigning ink to tones.
+
+    That is the real criterion, and there are two ways to satisfy it:
+
+      --ink-tone      every ink is re-pointed to one named tone outright.
+      a TOTAL tone map   every pixel's tone came from a declaration, so no
+                      nearest-anchor distance was ever computed. `unmapped_px
+                      == 0` is exactly that statement; a map with unmapped ink
+                      falls through to the anchors for the remainder and is
+                      NOT pinned.
+
+    Either way the geometry is identical on every colourway, and the part is
+    placeable on any board.  MEASURED both ways: reckless_black at 35 mm with
+    --ink-tone, and the sans emission through its declared map, each render
+    md5-identical under purple, white and black.
+
+    Do NOT substitute the tempting shortcut "emits only one tone" -- that is a
+    property of the OUTPUT, not of how the output was decided. mfb_lockup is
+    T1-only on purple and moves wholesale to F.Mask on white.
+    """
+    if getattr(args, "ink_tone", None) is not None:
+        return True
+    st = getattr(args, "_tonemap_stats", None)
+    return bool(st) and st.get("unmapped_px", -1) == 0
+
+
 def _tags_for(pal, tmap, pinned=False):
     """The footprint's `tags` string: what this part was assigned against.
 
@@ -4268,12 +4295,10 @@ def _tags_for(pal, tmap, pinned=False):
     tree keeps being bitten by.  So the digest goes on the part as well, and
     consumers compare THAT.
 
-    `pinned` means --ink-tone was given: every ink was re-pointed to one named
-    tone and the palette never took a decision, so the geometry is identical on
-    every colourway.  Such a part is marked colourway:any and is placeable on
-    any board.  MEASURED: reckless_mono at 35 mm renders md5-identical under
-    purple, white and black.  Do not confuse this with "emits only one tone" --
-    mfb_lockup is T1-only on purple and moves wholesale to F.Mask on white.
+    `pinned` is _is_pinned(args): the palette took no part in assignment, by
+    --ink-tone or by a TOTAL tone map.  Such a part is marked colourway:any and
+    is placeable on any board, because its geometry is identical on every
+    colourway.  See _is_pinned for what that does and does not mean.
     """
     if pinned:
         return " ".join(["recklessart", "art", COLOURWAY_ANY])
@@ -5029,8 +5054,7 @@ def main(argv=None):
             stipple_pitch_mm=args.stipple_pitch,
             halftone_levels=args.halftone_levels,
             microtext=mt_spec,
-            pal=pal, tags=_tags_for(pal, tmap,
-                                   pinned=args.ink_tone is not None))
+            pal=pal, tags=_tags_for(pal, tmap, pinned=_is_pinned(args)))
     except RegionOpError as e:
         sys.stderr.write(f"\n!! {e}\n\n")
         return 2
@@ -5090,7 +5114,7 @@ def main(argv=None):
     rep["source"] = str(args.labels)
     if getattr(args, "_rasteriser", None):
         rep["rasteriser"] = args._rasteriser
-    rep["tags"] = _tags_for(pal, tmap, pinned=args.ink_tone is not None)
+    rep["tags"] = _tags_for(pal, tmap, pinned=_is_pinned(args))
     if tmap is not None:
         st = getattr(args, "_tonemap_stats", {})
         rep["tone_map"] = {
