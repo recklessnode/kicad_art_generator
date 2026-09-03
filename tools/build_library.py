@@ -1052,7 +1052,8 @@ class Piece:
     emit_args: list[str]
     descr: str | None
     sidecars: list[str]
-    mask: str = "black"
+    # None means PORTABLE: no colourway was named, so none is claimed.
+    mask: str | None = None
     tone_map: dict | None = None      # tone_map.ToneMap.to_dict() shape
     allow_inner: bool = False
     allow_provisional: bool = False
@@ -1162,7 +1163,8 @@ def run_emit(piece: Piece, out_file: Path, report_file: Path,
            "--name", piece.name,
            "-o", str(out_file),
            "--report-json", str(report_file)]
-    cmd += ["--palette-mask", piece.mask]
+    if piece.mask:                      # omitted when portable
+        cmd += ["--palette-mask", piece.mask]
     if piece.tone_map is not None:
         # Serialised beside the staged footprint, in the stage this run owns.
         # The DIGEST of it goes into the footprint's tags, so a part and the
@@ -1759,7 +1761,7 @@ def _propose_tones(a, sources: list[Path], mask: str) -> int:
     return 3 if findings else 0
 
 
-def _resolve_tone_map(src: Path, settings: dict, mask: str
+def _resolve_tone_map(src: Path, settings: dict, mask: str | None
                       ) -> tuple[dict | None, bool, bool]:
     """-> (serialisable tone map or None, allow_inner, allow_provisional).
 
@@ -1772,7 +1774,12 @@ def _resolve_tone_map(src: Path, settings: dict, mask: str
     if not rows:
         return None, False, False
     inner_ok = bool(settings.get("inner_ok", False))
-    pal = palette.palette_for(mask, allow_provisional=True)
+    # `mask` is what the section DECLARED and may be None for a portable
+    # piece. Validation still needs a real tone table -- legibility and
+    # off_palette are checked against values -- so it falls back to black
+    # HERE ONLY. The map records the declared value below, so a portable
+    # piece does not end up claiming a colourway it never chose.
+    pal = palette.palette_for(mask or "black", allow_provisional=True)
     need_inner = sorted({r["tone"] for r in rows if pal[r["tone"]].inner})
     if need_inner and not inner_ok:
         raise Usage(
@@ -1853,7 +1860,19 @@ def _plan(a, out: dict, exclude: list[Path]
             settings.get("min_area", "auto")
         emit = list(a.emit_arg) + list(settings.get("emit", []))
         base = settings.get("name") or src.stem
-        mask = (a.palette_mask or settings.get("mask") or "black").lower()
+        # THE DEFAULT IS PORTABLE, NOT PURPLE AND NOT BLACK. A colourway is
+        # claimed only when one is NAMED -- on the command line, or by the
+        # section declaring the mask its tone choices were reasoned for.
+        # Falling back to "black" made every piece assert it had been built
+        # for a board nobody picked.
+        _m = a.palette_mask or settings.get("mask")
+        mask = _m.lower() if _m else None
+        # Validate the map against a REFERENCE palette even when the piece
+        # claims no colourway -- legibility and off_palette are checked
+        # against real tone values, and there has to be a table to check
+        # against. Black is the historical reference. Validating against it
+        # is not the same as CLAIMING it: piece.mask stays None, no
+        # --palette-mask is passed, and the part is tagged colourway:any.
         tmap, inner, prov = _resolve_tone_map(src, settings, mask)
         try:
             nm = slug(a.prefix + base, a.allow_unicode_names)

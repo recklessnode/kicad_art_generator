@@ -300,7 +300,13 @@ class ToneMap:
                 legibility=str(r.get("legibility") or ""),
                 note=str(r.get("note") or "")))
         return ToneMap(
-            mask=str(d.get("mask", "black")), inks=tuple(inks),
+            # None, NOT "black". A map that does not declare a mask has not
+            # been reasoned for one, and defaulting it to black made that
+            # indistinguishable from a map that WAS written for a black
+            # board -- which is how every untagged part in the library came
+            # to be assigned against a colourway nobody chose.
+            mask=(str(d["mask"]) if d.get("mask") else None),
+            inks=tuple(inks),
             tol_de=float(d.get("tol_de", DEFAULT_TOL_DE)),
             unmapped_budget_pct=float(d.get("unmapped_budget_pct",
                                             DEFAULT_UNMAPPED_BUDGET_PCT)),

@@ -4251,7 +4251,7 @@ PALETTE_DIGEST_PREFIX = "palette-digest:"
 COLOURWAY_ANY = "colourway:any"
 
 
-def _is_pinned(args):
+def _is_pinned(args, tmap=None):
     """True when the PALETTE TOOK NO PART in assigning ink to tones.
 
     That is the real criterion, and there are two ways to satisfy it:
@@ -4272,6 +4272,16 @@ def _is_pinned(args):
     property of the OUTPUT, not of how the output was decided. mfb_lockup is
     T1-only on purple and moves wholesale to F.Mask on white.
     """
+    # TARGETED beats every other consideration. If a colourway was NAMED --
+    # on the command line, or by the recipe declaring the mask its tone choices
+    # were reasoned for -- then this part was built FOR that board and must say
+    # so, however portable its geometry happens to be. Claiming colourway:any
+    # for a part the builder refuses to produce for another colourway is the
+    # kind of statement-that-is-not-true this tree keeps having to dig out.
+    if (getattr(args, "palette_mask", None) is not None
+            or getattr(args, "palette_silk", None) is not None
+            or (tmap is not None and getattr(tmap, "mask", None))):
+        return False
     if getattr(args, "ink_tone", None) is not None:
         return True
     st = getattr(args, "_tonemap_stats", None)
@@ -5054,7 +5064,7 @@ def main(argv=None):
             stipple_pitch_mm=args.stipple_pitch,
             halftone_levels=args.halftone_levels,
             microtext=mt_spec,
-            pal=pal, tags=_tags_for(pal, tmap, pinned=_is_pinned(args)))
+            pal=pal, tags=_tags_for(pal, tmap, pinned=_is_pinned(args, tmap)))
     except RegionOpError as e:
         sys.stderr.write(f"\n!! {e}\n\n")
         return 2
@@ -5114,7 +5124,7 @@ def main(argv=None):
     rep["source"] = str(args.labels)
     if getattr(args, "_rasteriser", None):
         rep["rasteriser"] = args._rasteriser
-    rep["tags"] = _tags_for(pal, tmap, pinned=_is_pinned(args))
+    rep["tags"] = _tags_for(pal, tmap, pinned=_is_pinned(args, tmap))
     if tmap is not None:
         st = getattr(args, "_tonemap_stats", {})
         rep["tone_map"] = {
