@@ -1878,6 +1878,18 @@ def _plan(a, out: dict, exclude: list[Path]
             nm = slug(a.prefix + base, a.allow_unicode_names)
             for size in sizes:
                 full = f"{nm}_{size_suffix(size)}"
+                # THE COLOURWAY IS PART OF THE NAME WHEN THERE IS ONE.
+                #
+                # A targeted piece and a portable one are different artefacts
+                # and must not share a filename: build_coupons places BY NAME
+                # from one library directory, and nothing else in the name, the
+                # call, or the file says which board a part was reasoned for.
+                # Portable pieces take no suffix, which is what keeps the common
+                # case readable -- and makes the suffix mean something when it
+                # does appear.
+                if mask:
+                    full += "_%s" % palette.palette_for(
+                        mask, allow_provisional=True).tag().split(":", 1)[1]
                 check_reserved(full)
                 pieces.append(Piece(src, float(size), full, min_area, emit,
                                     settings.get("descr"), used,
