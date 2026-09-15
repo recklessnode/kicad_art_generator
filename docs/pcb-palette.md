@@ -202,6 +202,66 @@ its own sampled anchors. The green-mask figures in `docs/images/` are a
 off them describes geometry rather than appearance. Both gaps close under the
 same issue, **#1 — sample real tones from a reference board**.
 
+## First measurements off a fabricated board
+
+Coupon alpha came back 2026-08-31 (JLCPCB, 4-layer, purple mask, ENIG, **ink-jet**
+legend) and was measured from head-on photographs on 2026-09-15. These replace
+theory for the three things they cover. Everything else in this document is still
+written from theory.
+
+**Scale reference.** The T5/T6/T7 band is three touching 6.5 mm patches, so the
+T6 patch calibrates the photograph: 556 px / 6.5 mm = 85.5 px/mm, one pixel =
+0.0117 mm, precision about +/- 0.018 mm.
+
+| feature | designed | measured | process |
+| --- | --- | --- | --- |
+| inter-tile gutter, spectre field | 0.250 mm | **0.257 mm** (median of 109 crossings) | copper under mask |
+| silk fraction bar, emission formula | 0.4293 mm | **0.421 mm** (8 columns) | legend ink |
+
+**The process is dimensionally faithful on both silk and copper**, to within the
+measurement precision. Nothing systematically grows or shrinks. An earlier reading
+of these same photographs claimed the ink spreads; that was wrong, and it was an
+optical artefact — ink-jet legend stands proud of the mask and its edge bead
+catches light, which reads as weight without being width.
+
+**What is NOT established.** The narrowest feature on that piece is 0.1538 mm,
+which is 13 px at this scale and cannot be separated from glyph edges. A 0.43 mm
+bar printing true does not prove a 0.15 mm hairline does. The 0.15 mm silk floor
+in this document remains **JLCPCB's published screen-print figure applied to an
+ink-jet process** — quoted, not measured.
+
+### T3's appearance is width-dependent
+
+The table above calls T3 *tan*. On coupon alpha the chest S of
+`art_satoshi_points` is T3 at hairline width and reads **near-black**, not tan.
+
+A narrow mask opening does not show the laminate's own colour: the mask shoulder
+shadows the channel, the opening's edge beads, and the visible laminate is a
+sliver at the bottom of a trench. The nominal colour needs width to appear.
+
+This matters because T3 is chosen for being *gold-adjacent* — a second
+gold-family tone available without copper. At hairline width it forfeits exactly
+that property and behaves as another dark tone. Minimum width for T3 to read as
+tan is **not yet measured**; the S is the counter-example, not the bound.
+
+### The spectre field is a projective calibration target
+
+`tilings.generate("spectre", bbox, tile_mm)` emits equilateral 14-gons: at
+`tile_mm=2.0`, 260 tiles over a 40x30 mm bbox with **one** edge length,
+0.6986 mm, across all 3,640 edges. (An internal helper reports two lengths in a
+pre-transform lattice basis; the public path is the equilateral one.)
+
+Known-equal lengths at many orientations, repeated thousands of times, is not
+merely a scale bar — it fixes scale *and* constrains the perspective, so an
+oblique photograph of a textured board can be rectified rather than discarded.
+The 0.25 mm gutter adds a second constant: measured across 109 crossings it
+carries sqrt(109) averaging, which is how the figure above was obtained without
+trusting any single edge.
+
+A board carrying this texture is therefore self-calibrating for metrology on
+anything drawn over it or beside it. That was a side effect of an art choice, not
+a design goal.
+
 ---
 
 # Shading between tones: hatching and stippling
