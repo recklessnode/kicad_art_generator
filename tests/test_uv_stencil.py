@@ -123,6 +123,28 @@ def test_back_side_mirrors_so_bands_read_as_seen():
     assert uv.print_frame(geometry("B"), "B", mirror_back=False).openings.bounds == f.openings.bounds
 
 
+def test_rotate_turns_the_board_clockwise_as_seen():
+    g = uv.print_frame(geometry("F"), "F", rotate=90)
+    x0, y0, x1, y1 = g.bbox
+    assert abs((x1 - x0) - 30) < 1e-9 and abs((y1 - y0) - 40) < 1e-9                  # a 40 x 30 board is now 30 x 40
+    c = g.openings.centroid
+    assert abs(c.x - 20) < 1e-9 and abs(c.y - 24) < 1e-9, (c.x, c.y)                  # the pad was left of centre; clockwise puts it above
+    assert uv.print_frame(geometry("F"), "F", rotate=360).bbox == geometry("F").bbox
+    try:
+        uv.print_frame(geometry("F"), "F", rotate=45)
+    except ValueError:
+        return
+    raise AssertionError("accepted a rotation that is not a multiple of 90")
+
+
+def test_a_rotated_print_has_swapped_pixel_size_and_still_clears_the_pad():
+    g = geometry()
+    _, mask, rep, _, _ = uv.build(g, "F", uv.Params(gutter=0.2, **NO_OPEN), 300, rotate=90)
+    w, h, _ = uv.pixel_size((0, 0, 30, 40), 300)
+    assert mask.shape == (h, w) and rep["rotated_clockwise"] == 90
+    assert rep["checks"]["pad_samples_printed"] == 0 and rep["checks"]["keepout_samples_printed"] == 0
+
+
 # ------------------------------------------------------------------------ raster
 def test_a_pixel_is_a_known_size():
     w, h, ppm = uv.pixel_size((0, 0, 40, 30), 600)

@@ -53,6 +53,8 @@ real values are what the experiment finds.]
   is board size.
 * The image is the face as seen looking at it. The back side is mirrored left to right relative to the top view, so text on its silk reads correctly;
   `--no-mirror-back` turns that off.
+* `--rotate 90` (or 180, 270) turns the board clockwise, as seen, after any mirroring. A portrait board lies sideways under landscape art; the PNG
+  is then as wide as the board is tall.
 * Edges are hard: alpha is 0 or the art's own, never a blend, so a gutter is a gutter.
 * Where alpha is 0 the colour is white, not black. If a print workflow ignores alpha, white is the safe colour on a white board.
 * `--fit` is `cover` (fill the board and crop), `contain` (the whole image, the rest transparent) or `stretch`; `--anchor` picks which part survives a crop.

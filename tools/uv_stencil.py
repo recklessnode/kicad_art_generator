@@ -33,6 +33,7 @@ each cut with its own gutter. One print then carries a sweep, and the same artwo
 ORIENTATION, SIZE AND INK
 -------------------------
 * The image is the face as seen looking at it. The back side is therefore mirrored relative to the top view (--no-mirror-back turns that off).
+* --rotate turns the board 90, 180 or 270 degrees clockwise, as seen, after any mirroring: a long board can lie sideways under landscape art.
 * The image covers the board's bounding box exactly, at --dpi, and carries that DPI in the file: printed at 100%, it is board size.
 * Edges are hard (alpha is 0 or the art's own), so a gutter is a gutter. A pixel is 25.4/dpi mm: at 600 dpi, 0.042 mm.
 * Where alpha is 0 the colour is white, not black: if a print workflow ignores alpha, white is the safe colour on a white board.
@@ -106,11 +107,19 @@ def load_geometry(d: dict) -> Geometry:
     return Geometry(_polys(d["outline"]), _polys(d["openings"]), _polys(d["silk"]), unary_union(holes), _polys(d["courtyards"]), meta)
 
 
-def print_frame(geom: Geometry, side: str, mirror_back: bool = True) -> Geometry:
-    """The geometry as seen looking at the face. The back side is mirrored left to right about the board's centre."""
+def print_frame(geom: Geometry, side: str, mirror_back: bool = True, rotate: int = 0) -> Geometry:
+    """The geometry as seen looking at the face. The back side is mirrored left to right about the board's centre; then the board is turned
+    `rotate` degrees clockwise (0, 90, 180 or 270), as when it lies sideways on the printer."""
+    if rotate % 90:
+        raise ValueError("rotate is a multiple of 90 degrees")
     if side.upper() == "B" and mirror_back:
         x0, _, x1, _ = geom.bbox
-        return geom.mapped(lambda g: affinity.scale(g, xfact=-1.0, yfact=1.0, origin=((x0 + x1) / 2, 0.0)) if not g.is_empty else g)
+        geom = geom.mapped(lambda g: affinity.scale(g, xfact=-1.0, yfact=1.0, origin=((x0 + x1) / 2, 0.0)) if not g.is_empty else g)
+    k = (rotate // 90) % 4
+    if k:
+        x0, y0, x1, y1 = geom.bbox
+        c = ((x0 + x1) / 2, (y0 + y1) / 2)
+        geom = geom.mapped(lambda g: affinity.rotate(g, -90 * k, origin=c) if not g.is_empty else g)         # shapely turns counter-clockwise for a positive angle
     return geom
 
 
@@ -381,9 +390,9 @@ def preview(geom: Geometry, region, bbox, px_per_mm: float, art_rgba: Image.Imag
 
 
 # ---------------------------------------------------------------------------------------------- the pipeline
-def build(geom: Geometry, side: str, params: Params, dpi: float, art=None, fit="cover", anchor="center", white=None, mirror_back=True):
+def build(geom: Geometry, side: str, params: Params, dpi: float, art=None, fit="cover", anchor="center", white=None, mirror_back=True, rotate: int = 0):
     """(rgba image or None, stencil mask, report). `geom` is in the top-view frame; the result is in the print frame."""
-    g = print_frame(geom, side, mirror_back)
+    g = print_frame(geom, side, mirror_back, rotate)
     bbox = g.bbox
     region, bands = banded_region(g, params)
     mask = rasterise(region, bbox, dpi)
@@ -397,7 +406,7 @@ def build(geom: Geometry, side: str, params: Params, dpi: float, art=None, fit="
     alpha = np.asarray(img)[..., 3] if img is not None else mask
     board_area = g.outline.area
     report = dict(
-        side=side.upper(), mirrored=side.upper() == "B" and mirror_back, dpi=dpi, size_px=[w, h], mm_per_px=round(25.4 / dpi, 5),
+        side=side.upper(), mirrored=side.upper() == "B" and mirror_back, rotated_clockwise=rotate % 360, dpi=dpi, size_px=[w, h], mm_per_px=round(25.4 / dpi, 5),
         board_mm=[round(bbox[2] - bbox[0], 4), round(bbox[3] - bbox[1], 4)], bands=bands,
         params=dict(keepout=params.keepout, gutter=params.gutter, silk_gutter=params.silk_gutter, hole_gutter=params.hole_gutter,
                     courtyard_gutter=params.courtyard_gutter, edge_margin=params.edge_margin, min_feature=params.min_feature, bands=list(params.bands)),
@@ -430,6 +439,8 @@ def main(argv=None) -> int:
                     help="turn near-white into transparency (white board only); threshold 0-1, default 0.85 when given")
     ap.add_argument("--remove-checkerboard", action="store_true",
                     help="clear a baked-in grey transparency checkerboard (read from the image's corners); reports what it found")
+    ap.add_argument("--rotate", type=int, choices=(0, 90, 180, 270), default=0,
+                    help="turn the board this many degrees clockwise, as seen, so a long board can lie sideways under landscape art (default 0)")
     ap.add_argument("--no-mirror-back", action="store_true", help="leave the back side as in the top view")
     ap.add_argument("--stencil-out", help="also write the stencil alone (white = may print)")
     ap.add_argument("--preview-out", help="also write a preview with the keepouts outlined")
@@ -449,14 +460,14 @@ def main(argv=None) -> int:
     bands = tuple(float(v) for v in a.bands.split(",")) if a.bands else ()
     params = Params(keepout=a.keepout, gutter=a.gutter, silk_gutter=a.silk_gutter, hole_gutter=a.hole_gutter, courtyard_gutter=a.courtyard_gutter,
                     edge_margin=a.edge_margin, min_feature=a.min_feature, bands=bands)
-    size = pixel_size(print_frame(geom, side, not a.no_mirror_back).bbox, a.dpi)
+    size = pixel_size(print_frame(geom, side, not a.no_mirror_back, a.rotate).bbox, a.dpi)
     art = load_art(a.art, size[:2]) if a.art else None
     checker = None
     if art is not None and a.remove_checkerboard:
         art, checker = remove_checkerboard(art)
         print("checkerboard: %s" % ("none found in the corners" if checker is None else "cleared %.1f%% of the image (tones %d and %d)" % (
             100 * checker["cleared_share"], *checker["tones"])))
-    img, mask, report, region, g = build(geom, side, params, a.dpi, art, a.fit, a.anchor, a.white_to_alpha, not a.no_mirror_back)
+    img, mask, report, region, g = build(geom, side, params, a.dpi, art, a.fit, a.anchor, a.white_to_alpha, not a.no_mirror_back, a.rotate)
 
     out = pathlib.Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
