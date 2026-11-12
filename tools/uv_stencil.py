@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """UV-printer art: cut an image to a board so ink never lands on pads, silk, holes or the board edge.
 
-    python3 tools/uv_stencil.py BOARD.kicad_pcb --side F --art art.png --out front.png --dpi 600 --gutter 0.20
+    python3 tools/uv_stencil.py BOARD.kicad_pcb --side F --art art.png --out front.png --gutter 0.20
 
 WHY THIS EXISTS
 ---------------
@@ -34,7 +34,7 @@ ORIENTATION, SIZE AND INK
 -------------------------
 * The image is the face as seen looking at it. The back side is therefore mirrored relative to the top view (--no-mirror-back turns that off).
 * The image covers the board's bounding box exactly, at --dpi, and carries that DPI in the file: printed at 100%, it is board size.
-* Edges are hard (alpha is 0 or the art's own), so a gutter is a gutter. A pixel is 25.4/dpi mm: at 600 dpi, 0.042 mm.
+* Edges are hard (alpha is 0 or the art's own), so a gutter is a gutter. A pixel is 25.4/dpi mm: at the default 1440 dpi (the Eufymake E1's), 0.018 mm.
 * Where alpha is 0 the colour is white, not black: if a print workflow ignores alpha, white is the safe colour on a white board.
 * --white-to-alpha turns near-white into transparency. On a white board white needs no ink. Only use it for a white board.
 * --remove-checkerboard clears the grey-and-white "transparency" checkerboard that is sometimes baked into a JPEG: a JPEG cannot carry
@@ -415,7 +415,7 @@ def main(argv=None) -> int:
     ap.add_argument("--save-geometry", help="keep the JSON read from the board")
     ap.add_argument("--art", help="the image: PNG, JPEG or SVG; without it only the stencil is written")
     ap.add_argument("--out", required=True, help="the print file: RGBA PNG at the board's size")
-    ap.add_argument("--dpi", type=float, default=600.0, help="pixels per inch of the print file (default 600)")
+    ap.add_argument("--dpi", type=float, default=1440.0, help="pixels per inch of the print file (default 1440, the Eufymake E1's)")
     ap.add_argument("--keepout", choices=("pads", "courtyards"), default="pads", help="what the gutter is measured from (default pads)")
     ap.add_argument("--gutter", type=float, default=0.20, help="mm clear between the art and a keepout (default 0.20)")
     ap.add_argument("--silk-gutter", type=float, help="mm, for silk (default: --gutter)")
