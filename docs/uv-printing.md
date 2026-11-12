@@ -8,7 +8,7 @@ one RGBA PNG per board side, at the board's size, ready to print. The reasoning 
 
 ```bash
 # 1. KiCad's Python reads the board (it needs pcbnew); the rest runs in this project's environment.
-python3 tools/uv_stencil.py BOARD.kicad_pcb --side F --art art.png --out front.png --dpi 600 --gutter 0.20
+python3 tools/uv_stencil.py BOARD.kicad_pcb --side F --art art.png --out front.png --gutter 0.20
 
 # a gutter sweep on one print: four vertical bands, left to right as seen, each cut with its own gutter
 python3 tools/uv_stencil.py BOARD.kicad_pcb --side F --art art.png --out front_sweep.png --bands 0.05,0.10,0.20,0.40
@@ -49,7 +49,8 @@ real values are what the experiment finds.]
 
 ## Size, orientation and ink
 
-* The PNG covers the board's bounding box exactly. One pixel is 25.4 / dpi mm (0.042 mm at 600 dpi) and the file carries the DPI, so printed at 100% it
+* The PNG covers the board's bounding box exactly. `--dpi` defaults to 1440, the Eufymake E1's: one pixel is 25.4 / dpi mm (0.018 mm), a 152 x 102 mm board is 8641 x 5760 px, the PNG is 58 MB
+  with a photographic image and takes 17 s to write (measured on one board). The file carries the DPI, so printed at 100% it
   is board size.
 * The image is the face as seen looking at it. The back side is mirrored left to right relative to the top view, so text on its silk reads correctly;
   `--no-mirror-back` turns that off.
