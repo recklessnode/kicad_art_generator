@@ -424,6 +424,11 @@ If the fully vectorized result is cleaner but too large, use `--bitmap-processin
 
 If an image is very large or detailed, reduce `--max-dimension` to keep the generated footprint smaller and easier to manage.
 
+## UV printing onto a finished board
+
+`tools/uv_stencil.py` cuts an image to a KiCad board for a UV flatbed printer: a transparent PNG at the board's size that leaves pads, silk, holes
+and the board edge clear, with an adjustable gutter. See [docs/uv-printing.md](docs/uv-printing.md).
+
 ## Conversation Log
 
 Commit-time history is tracked in [docs/conversation_log.md](docs/conversation_log.md).
